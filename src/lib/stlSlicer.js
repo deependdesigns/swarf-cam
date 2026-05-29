@@ -1,5 +1,18 @@
 // Slice an STL (ASCII or binary) at a given Z height and return 2D contour polygons
 
+export function getStlMinXY(stlData) {
+  const buffer = stlData instanceof ArrayBuffer ? stlData : stlData.buffer ?? stlData
+  const firstBytes = new Uint8Array(buffer, 0, Math.min(6, buffer.byteLength))
+  const isAscii = String.fromCharCode(...firstBytes).startsWith('solid')
+  const triangles = isAscii ? parseAsciiStl(buffer) : parseBinaryStl(buffer)
+  let minX = Infinity, minY = Infinity
+  for (const [v1, v2, v3] of triangles) {
+    if (v1[0] < minX) minX = v1[0]; if (v2[0] < minX) minX = v2[0]; if (v3[0] < minX) minX = v3[0]
+    if (v1[1] < minY) minY = v1[1]; if (v2[1] < minY) minY = v2[1]; if (v3[1] < minY) minY = v3[1]
+  }
+  return { minX: isFinite(minX) ? minX : 0, minY: isFinite(minY) ? minY : 0 }
+}
+
 export function getStlTopZ(stlData) {
   const buffer = stlData instanceof ArrayBuffer ? stlData : stlData.buffer ?? stlData
   const firstBytes = new Uint8Array(buffer, 0, Math.min(6, buffer.byteLength))

@@ -2,13 +2,13 @@ import { useEffect, useRef } from 'react'
 import { useAppState } from '../context/AppStateContext'
 import {
   initThreeScene, loadStlIntoScene, disposeScene,
-  renderToolpaths, clearToolpaths, highlightOperation,
+  renderToolpaths, clearToolpaths, highlightOperation, updateWorkArea,
 } from '../lib/threeScene'
 
 export default function PreviewPanel() {
   const {
     stlData, toolpathData, showToolpaths, setShowToolpaths,
-    selectedOperationId,
+    selectedOperationId, machineSettings,
   } = useAppState()
   const mountRef = useRef(null)
   const sceneRef = useRef(null)
@@ -17,6 +17,7 @@ export default function PreviewPanel() {
     if (!mountRef.current) return
     const scene = initThreeScene(mountRef.current)
     sceneRef.current = scene
+    updateWorkArea(scene, machineSettings.workAreaX, machineSettings.workAreaY)
     return () => {
       disposeScene(scene)
       sceneRef.current = null
@@ -46,6 +47,12 @@ export default function PreviewPanel() {
       highlightOperation(sceneRef.current, selectedOperationId)
     }
   }, [selectedOperationId])
+
+  useEffect(() => {
+    if (sceneRef.current) {
+      updateWorkArea(sceneRef.current, machineSettings.workAreaX, machineSettings.workAreaY)
+    }
+  }, [machineSettings.workAreaX, machineSettings.workAreaY])
 
   return (
     <div className="flex flex-col h-full">

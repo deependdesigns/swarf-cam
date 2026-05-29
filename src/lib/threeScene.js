@@ -107,9 +107,9 @@ export function renderToolpaths(state, toolpathData) {
     opGroup.userData.mat = mat
 
     for (const polyline of op.paths) {
-      const cx = state.stlCenter?.x ?? 0
-      const cy = state.stlCenter?.y ?? 0
-      const pts = polyline.map(([x, y, z]) => new THREE.Vector3(x - cx, topY + z, -(y - cy)))
+      const ox = state.stlMin?.x ?? 0
+      const oy = state.stlMin?.y ?? 0
+      const pts = polyline.map(([x, y, z]) => new THREE.Vector3(x - ox, topY + z, -(y - oy)))
       const geo = new THREE.BufferGeometry().setFromPoints(pts)
       opGroup.add(new THREE.Line(geo, mat))
     }
@@ -149,10 +149,10 @@ export function loadStlIntoScene(state, stlArrayBuffer) {
   const geometry = loader.parse(stlArrayBuffer)
   geometry.computeVertexNormals()
   geometry.computeBoundingBox()
-  const stlCenter = new THREE.Vector3()
-  geometry.boundingBox.getCenter(stlCenter)
-  state.stlCenter = stlCenter
-  geometry.center()
+  const stlMin = geometry.boundingBox.min.clone()
+  state.stlMin = stlMin
+  // Translate so bottom-left-bottom corner sits at origin (standard CNC: X0 Y0 Z0 at workpiece corner)
+  geometry.translate(-stlMin.x, -stlMin.y, -stlMin.z)
 
   const material = new THREE.MeshStandardMaterial({
     color: 0x8899aa,
@@ -171,11 +171,12 @@ export function loadStlIntoScene(state, stlArrayBuffer) {
   // Fit camera
   const box = new THREE.Box3().setFromObject(mesh)
   const size = box.getSize(new THREE.Vector3())
+  const center = box.getCenter(new THREE.Vector3())
   const maxDim = Math.max(size.x, size.y, size.z)
   const fov = state.camera.fov * (Math.PI / 180)
   const dist = Math.abs(maxDim / Math.sin(fov / 2)) * 0.8
-  state.camera.position.set(dist * 0.7, dist * 0.5, dist * 0.7)
-  state.controls.target.set(0, 0, 0)
+  state.camera.position.set(center.x + dist * 0.7, center.y + dist * 0.5, center.z + dist * 0.7)
+  state.controls.target.copy(center)
   state.controls.update()
 
   // Fit shadow frustum to model so the shadow map covers the whole mesh
@@ -186,6 +187,29 @@ export function loadStlIntoScene(state, stlArrayBuffer) {
   sc.top = shadowPad
   sc.bottom = -shadowPad
   sc.updateProjectionMatrix()
+}
+
+export function updateWorkArea(state, workAreaX, workAreaY) {
+  if (state.workAreaLine) {
+    state.scene.remove(state.workAreaLine)
+    state.workAreaLine.geometry.dispose()
+    state.workAreaLine.material.dispose()
+    state.workAreaLine = null
+  }
+  if (!workAreaX || !workAreaY) return
+
+  // CNC X→Three.js X, CNC Y→Three.js -Z; rectangle on the ground plane (Y=0)
+  const pts = [
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(workAreaX, 0, 0),
+    new THREE.Vector3(workAreaX, 0, -workAreaY),
+    new THREE.Vector3(0, 0, -workAreaY),
+    new THREE.Vector3(0, 0, 0),
+  ]
+  const geo = new THREE.BufferGeometry().setFromPoints(pts)
+  const mat = new THREE.LineBasicMaterial({ color: 0x225522 })
+  state.workAreaLine = new THREE.Line(geo, mat)
+  state.scene.add(state.workAreaLine)
 }
 
 export function disposeScene(state) {

@@ -1,6 +1,6 @@
 import { getPostProcessor } from './postProcessors/index'
 import {
-  extractSliceContours, getStlTopZ, getFeatureDepths,
+  extractSliceContours, getStlTopZ, getStlMinXY, getFeatureDepths,
   getFloorZLevels, getRegionFloorDepth,
   polygonArea, polygonCentroid,
 } from './stlSlicer'
@@ -363,6 +363,7 @@ export function generateGcode(stlArrayBuffer, operations, postProcessorId, globa
   const zBase = machineSettings.zZeroMode === 'spoilboard' ? machineSettings.materialThickness : 0
   const safeZ = zBase + machineSettings.safetyHeight
   const originSafeZ = zBase + machineSettings.originSafetyHeight
+  const { minX: stlMinX, minY: stlMinY } = getStlMinXY(stlArrayBuffer)
   const lines = []
 
   const enabledOps = operations.filter(op => op.enabled !== false)
@@ -374,9 +375,9 @@ export function generateGcode(stlArrayBuffer, operations, postProcessorId, globa
     lines.push(pp.comment(`=== ${eop.label} ===`))
 
     const opLines =
-      eop.type === 'drill' ? generateDrill(eop, pp, safeZ, originSafeZ, machineSettings, zBase) :
-      eop.type === 'slot'  ? generateSlot(eop, pp, safeZ, originSafeZ, machineSettings, zBase) :
-      generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, machineSettings, zBase)
+      eop.type === 'drill' ? generateDrill(eop, pp, safeZ, originSafeZ, machineSettings, zBase, stlMinX, stlMinY) :
+      eop.type === 'slot'  ? generateSlot(eop, pp, safeZ, originSafeZ, machineSettings, zBase, stlMinX, stlMinY) :
+      generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, machineSettings, zBase, stlMinX, stlMinY)
 
     for (const line of opLines) lines.push(line)
     lines.push(pp.footer(originSafeZ))
@@ -386,10 +387,11 @@ export function generateGcode(stlArrayBuffer, operations, postProcessorId, globa
   return lines.join('\n')
 }
 
-function ox(x, ms) { return x + ms.xOffset }
-function oy(y, ms) { return y + ms.yOffset }
+// Coordinates are workpiece-relative (STL min subtracted) then shifted by machine origin offset
+function ox(x, ms, minX) { return (x - minX) + ms.xOffset }
+function oy(y, ms, minY) { return (y - minY) + ms.yOffset }
 
-function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBase) {
+function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBase, stlMinX, stlMinY) {
   const lines = []
   const stepdown = Math.max(eop.stepdown, 0.001)
   const topZ = getStlTopZ(stlArrayBuffer)
@@ -427,12 +429,12 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
       for (const path of toolpaths) {
         if (path.length < 2) continue
         const [startX, startY] = path[0]
-        lines.push(pp.rapidTo(ox(startX, ms), oy(startY, ms), safeZ))
+        lines.push(pp.rapidTo(ox(startX, ms, stlMinX), oy(startY, ms, stlMinY), safeZ))
         lines.push(pp.linearTo(undefined, undefined, cutZ, eop.feedrate * 0.3))
         for (let k = 1; k < path.length; k++) {
-          lines.push(pp.linearTo(ox(path[k][0], ms), oy(path[k][1], ms), undefined, eop.feedrate))
+          lines.push(pp.linearTo(ox(path[k][0], ms, stlMinX), oy(path[k][1], ms, stlMinY), undefined, eop.feedrate))
         }
-        lines.push(pp.linearTo(ox(startX, ms), oy(startY, ms), undefined, eop.feedrate))
+        lines.push(pp.linearTo(ox(startX, ms, stlMinX), oy(startY, ms, stlMinY), undefined, eop.feedrate))
         lines.push(pp.rapidTo(undefined, undefined, safeZ))
       }
     }
@@ -441,7 +443,7 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
   return lines
 }
 
-function generateDrill(eop, pp, safeZ, originSafeZ, ms, zBase) {
+function generateDrill(eop, pp, safeZ, originSafeZ, ms, zBase, stlMinX, stlMinY) {
   const lines = []
   const centroids = eop.centroids ?? (eop.centroid ? [eop.centroid] : [])
 
@@ -453,8 +455,8 @@ function generateDrill(eop, pp, safeZ, originSafeZ, ms, zBase) {
   lines.push(pp.rapidTo(undefined, undefined, originSafeZ))
   for (const [cx, cy] of centroids) {
     const cutZ = zBase - eop.depth
-    lines.push(pp.comment(`Drill X${cx.toFixed(3)} Y${cy.toFixed(3)} depth ${eop.depth.toFixed(3)}`))
-    lines.push(pp.rapidTo(ox(cx, ms), oy(cy, ms), safeZ))
+    lines.push(pp.comment(`Drill X${(cx - stlMinX + ms.xOffset).toFixed(3)} Y${(cy - stlMinY + ms.yOffset).toFixed(3)} depth ${eop.depth.toFixed(3)}`))
+    lines.push(pp.rapidTo(ox(cx, ms, stlMinX), oy(cy, ms, stlMinY), safeZ))
     lines.push(pp.linearTo(undefined, undefined, cutZ, eop.feedrate * 0.5))
     lines.push(pp.rapidTo(undefined, undefined, safeZ))
   }
@@ -462,7 +464,7 @@ function generateDrill(eop, pp, safeZ, originSafeZ, ms, zBase) {
   return lines
 }
 
-function generateSlot(eop, pp, safeZ, originSafeZ, ms, zBase) {
+function generateSlot(eop, pp, safeZ, originSafeZ, ms, zBase, stlMinX, stlMinY) {
   const lines = []
   const { slotBounds } = eop
   if (!slotBounds) { lines.push(pp.comment('No slot bounds')); return lines }
@@ -479,9 +481,9 @@ function generateSlot(eop, pp, safeZ, originSafeZ, ms, zBase) {
     const cutZ = zBase - Math.min(pass * stepdown, effectiveDepth)
     lines.push(pp.comment(`Slot pass ${pass}/${zPasses} — depth ${(zBase - cutZ).toFixed(3)} mm`))
     for (const [[x1, y1], [x2, y2]] of slotPasses) {
-      lines.push(pp.rapidTo(ox(x1, ms), oy(y1, ms), safeZ))
+      lines.push(pp.rapidTo(ox(x1, ms, stlMinX), oy(y1, ms, stlMinY), safeZ))
       lines.push(pp.linearTo(undefined, undefined, cutZ, eop.feedrate * 0.3))
-      lines.push(pp.linearTo(ox(x2, ms), oy(y2, ms), undefined, eop.feedrate))
+      lines.push(pp.linearTo(ox(x2, ms, stlMinX), oy(y2, ms, stlMinY), undefined, eop.feedrate))
       lines.push(pp.rapidTo(undefined, undefined, safeZ))
     }
   }
