@@ -1,9 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { useAppState } from '../context/AppStateContext'
-import { initThreeScene, loadStlIntoScene, disposeScene } from '../lib/threeScene'
+import { initThreeScene, loadStlIntoScene, disposeScene, renderToolpaths, clearToolpaths } from '../lib/threeScene'
 
 export default function PreviewPanel() {
-  const { stlData } = useAppState()
+  const { stlData, toolpathData, showToolpaths, setShowToolpaths } = useAppState()
   const mountRef = useRef(null)
   const sceneRef = useRef(null)
 
@@ -23,14 +23,38 @@ export default function PreviewPanel() {
     }
   }, [stlData])
 
+  // Re-render toolpaths whenever data or visibility changes
+  useEffect(() => {
+    if (!sceneRef.current) return
+    if (showToolpaths && toolpathData) {
+      renderToolpaths(sceneRef.current, toolpathData)
+    } else {
+      clearToolpaths(sceneRef.current)
+    }
+  }, [toolpathData, showToolpaths])
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-3 py-2 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
         <span className="text-[#888] text-xs uppercase tracking-wider">3D Preview</span>
-        <div className="flex items-center gap-3 text-[#444] text-xs">
-          <span>drag: rotate</span>
-          <span>scroll: zoom</span>
-          <span>shift+drag: pan</span>
+        <div className="flex items-center gap-3">
+          {toolpathData && (
+            <button
+              onClick={() => setShowToolpaths(v => !v)}
+              className={`px-2 py-1 text-xs border rounded transition-colors ${
+                showToolpaths
+                  ? 'bg-[#0d2a1a] border-[#1a5a2a] text-[#69f0ae]'
+                  : 'bg-[#1a1a1a] border-[#333] text-[#555]'
+              }`}
+            >
+              {showToolpaths ? '⬡ Paths' : '⬡ Paths'}
+            </button>
+          )}
+          <div className="flex items-center gap-3 text-[#444] text-xs">
+            <span>drag: rotate</span>
+            <span>scroll: zoom</span>
+            <span>shift+drag: pan</span>
+          </div>
         </div>
       </div>
       <div className="flex-1 relative min-h-0">

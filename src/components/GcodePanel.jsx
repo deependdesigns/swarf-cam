@@ -1,14 +1,14 @@
 import Editor from '@monaco-editor/react'
 import { useAppState } from '../context/AppStateContext'
-import { generateGcode } from '../lib/gcodeGenerator'
+import { generateGcode, computeToolpathData } from '../lib/gcodeGenerator'
 
 export default function GcodePanel() {
-  const { gcode, setGcode, operations, stlData, postProcessor } = useAppState()
+  const { gcode, setGcode, operations, stlData, postProcessor, setToolpathData } = useAppState()
 
   function handleGenerate() {
     if (!stlData) return
-    const result = generateGcode(stlData, operations, postProcessor)
-    setGcode(result)
+    setGcode(generateGcode(stlData, operations, postProcessor))
+    setToolpathData(computeToolpathData(stlData, operations))
   }
 
   function handleDownload() {

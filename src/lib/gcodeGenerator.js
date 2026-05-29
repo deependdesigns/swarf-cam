@@ -2,6 +2,51 @@ import { getPostProcessor } from './postProcessors/index'
 import { extractSliceContours } from './stlSlicer'
 import { offsetContours } from './toolpathOffsets'
 
+const OP_COLORS = [0x00e5ff, 0xffab40, 0x69f0ae, 0xff4081, 0xea80fc]
+
+// Returns 3D toolpath geometry for visualization — separate from G-code text.
+export function computeToolpathData(stlArrayBuffer, operations) {
+  const result = []
+
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i]
+    const color = OP_COLORS[i % OP_COLORS.length]
+    const paths = []  // array of polylines, each polyline is [[x,y,z], ...]
+
+    if (op.type === 'drill') {
+      paths.push([[0, 0, 0], [0, 0, -op.depth]])
+      result.push({ label: op.label, color, paths })
+      continue
+    }
+
+    const stepdown = Math.max(op.stepdown, 0.001)
+    const zPasses = Math.ceil(op.depth / stepdown)
+    const contours = extractSliceContours(stlArrayBuffer, 0)
+    if (contours.length === 0) {
+      result.push({ label: op.label, color, paths })
+      continue
+    }
+
+    const toolRadius = op.toolDiameter / 2
+    const offsetDist = op.type === 'profile' ? toolRadius : -toolRadius
+    const toolpaths = offsetContours(contours, offsetDist)
+
+    for (let pass = 1; pass <= zPasses; pass++) {
+      const z = -Math.min(pass * stepdown, op.depth)
+      for (const path of toolpaths) {
+        if (path.length < 2) continue
+        const polyline = path.map(([x, y]) => [x, y, z])
+        polyline.push([path[0][0], path[0][1], z]) // close loop
+        paths.push(polyline)
+      }
+    }
+
+    result.push({ label: op.label, color, paths })
+  }
+
+  return result
+}
+
 export function generateGcode(stlArrayBuffer, operations, postProcessorId) {
   const pp = getPostProcessor(postProcessorId)
   const lines = []

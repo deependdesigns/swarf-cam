@@ -76,8 +76,47 @@ export function initThreeScene(container) {
   return state
 }
 
+export function clearToolpaths(state) {
+  if (!state.toolpathGroup) return
+  state.toolpathGroup.traverse(obj => {
+    obj.geometry?.dispose()
+    obj.material?.dispose()
+  })
+  state.scene.remove(state.toolpathGroup)
+  state.toolpathGroup = null
+}
+
+export function renderToolpaths(state, toolpathData) {
+  clearToolpaths(state)
+  if (!toolpathData?.length) return
+
+  // Anchor toolpath Z to the top of the loaded model
+  let topY = 0
+  if (state.mesh) {
+    topY = new THREE.Box3().setFromObject(state.mesh).max.y
+  }
+
+  const group = new THREE.Group()
+
+  for (const op of toolpathData) {
+    const mat = new THREE.LineBasicMaterial({ color: op.color })
+    for (const polyline of op.paths) {
+      // Coordinate transform: STL (x,y,z_depth) → Three.js (x, topY+z_depth, -y)
+      // because mesh.rotation.x = -π/2 maps STL-Z to Three.js-Y and flips STL-Y to -Z
+      const pts = polyline.map(([x, y, z]) => new THREE.Vector3(x, topY + z, -y))
+      const geo = new THREE.BufferGeometry().setFromPoints(pts)
+      group.add(new THREE.Line(geo, mat))
+    }
+  }
+
+  state.scene.add(group)
+  state.toolpathGroup = group
+}
+
 export function loadStlIntoScene(state, stlArrayBuffer) {
   const { scene } = state
+
+  clearToolpaths(state)
 
   if (state.mesh) {
     scene.remove(state.mesh)

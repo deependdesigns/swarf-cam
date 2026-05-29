@@ -36,6 +36,8 @@ export default function App() {
   const [operations, setOperations] = useState([DEFAULT_OPERATION])
   const [gcode, setGcode] = useState('')
   const [postProcessor, setPostProcessor] = useState('grbl')
+  const [toolpathData, setToolpathData] = useState(null)
+  const [showToolpaths, setShowToolpaths] = useState(true)
 
   const handleStlReady = useCallback((data) => {
     setStlData(data)
@@ -50,6 +52,8 @@ export default function App() {
       operations, setOperations,
       gcode, setGcode,
       postProcessor, setPostProcessor,
+      toolpathData, setToolpathData,
+      showToolpaths, setShowToolpaths,
     }}>
       <div className="flex flex-col h-full bg-[#0d0d0d]">
         <Header />
