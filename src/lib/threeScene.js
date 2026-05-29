@@ -29,6 +29,9 @@ export function initThreeScene(container) {
   const dirLight = new THREE.DirectionalLight(0xffffff, 0.9)
   dirLight.position.set(80, 120, 80)
   dirLight.castShadow = true
+  dirLight.shadow.mapSize.set(2048, 2048)
+  dirLight.shadow.camera.near = 0.1
+  dirLight.shadow.camera.far = 1000
   scene.add(dirLight)
 
   const fillLight = new THREE.DirectionalLight(0x4466cc, 0.3)
@@ -49,7 +52,7 @@ export function initThreeScene(container) {
   controls.panSpeed = 0.8
 
   // State
-  const state = { renderer, scene, camera, controls, container, mesh: null, animId: null }
+  const state = { renderer, scene, camera, controls, dirLight, container, mesh: null, animId: null }
 
   // Resize observer
   const ro = new ResizeObserver(() => {
@@ -111,6 +114,15 @@ export function loadStlIntoScene(state, stlArrayBuffer) {
   state.camera.position.set(dist * 0.7, dist * 0.5, dist * 0.7)
   state.controls.target.set(0, 0, 0)
   state.controls.update()
+
+  // Fit shadow frustum to model so the shadow map covers the whole mesh
+  const shadowPad = maxDim * 0.6
+  const sc = state.dirLight.shadow.camera
+  sc.left = -shadowPad
+  sc.right = shadowPad
+  sc.top = shadowPad
+  sc.bottom = -shadowPad
+  sc.updateProjectionMatrix()
 }
 
 export function disposeScene(state) {
