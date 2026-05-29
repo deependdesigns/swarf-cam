@@ -1,10 +1,10 @@
-import { useState } from 'react'
 import { useAppState } from '../context/AppStateContext'
 
 const OP_TYPES = [
   { id: 'profile', label: 'Profile' },
   { id: 'pocket', label: 'Pocket' },
   { id: 'drill', label: 'Drill' },
+  { id: 'slot', label: 'Slot (open)' },
 ]
 
 const DIRECTIONS = [
@@ -12,89 +12,95 @@ const DIRECTIONS = [
   { id: 'conventional', label: 'Conventional' },
 ]
 
-let nextId = 2
+// Swatch color from the hex number stored on each operation
+function swatchStyle(color) {
+  return { background: color ? `#${color.toString(16).padStart(6, '0')}` : '#6b9fff' }
+}
 
 export default function OperationsPanel() {
-  const { operations, setOperations } = useAppState()
-  const [selectedId, setSelectedId] = useState(operations[0]?.id ?? null)
+  const {
+    operations, setOperations,
+    selectedOperationId, setSelectedOperationId,
+  } = useAppState()
 
-  const selected = operations.find((op) => op.id === selectedId)
-
-  function addOperation() {
-    const newOp = {
-      id: nextId++,
-      type: 'profile',
-      label: `Operation ${nextId - 1}`,
-      toolDiameter: 3.175,
-      feedrate: 1000,
-      spindleSpeed: 18000,
-      stepdown: 1.0,
-      depth: 10.0,
-      passes: 1,
-      direction: 'climb',
-    }
-    setOperations((ops) => [...ops, newOp])
-    setSelectedId(newOp.id)
-  }
+  const selected = operations.find((op) => op.id === selectedOperationId)
 
   function removeOperation(id) {
-    setOperations((ops) => ops.filter((op) => op.id !== id))
-    setSelectedId((prev) => {
-      if (prev === id) return operations.find((op) => op.id !== id)?.id ?? null
-      return prev
+    setOperations((ops) => {
+      const next = ops.filter((op) => op.id !== id)
+      if (id === selectedOperationId) setSelectedOperationId(next[0]?.id ?? null)
+      return next
     })
   }
 
   function updateField(field, value) {
     setOperations((ops) =>
-      ops.map((op) => (op.id === selectedId ? { ...op, [field]: value } : op))
+      ops.map((op) => (op.id === selectedOperationId ? { ...op, [field]: value } : op))
     )
   }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
+      <div className="flex items-center px-3 py-2 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
         <span className="text-[#888] text-xs uppercase tracking-wider">Operations</span>
-        <button
-          onClick={addOperation}
-          className="px-2 py-1 text-xs bg-[#1a1a1a] hover:bg-[#252525] border border-[#333] text-[#aaa] rounded transition-colors"
-        >
-          + Add
-        </button>
       </div>
 
       {/* Operation list */}
-      <div className="border-b border-[#2a2a2a] shrink-0">
+      <div className="border-b border-[#2a2a2a] overflow-y-auto max-h-[45%] shrink-0">
         {operations.map((op) => (
           <div
             key={op.id}
-            onClick={() => setSelectedId(op.id)}
+            onClick={() => setSelectedOperationId(op.id)}
             className={`flex items-center justify-between px-3 py-2 cursor-pointer transition-colors ${
-              op.id === selectedId
+              op.id === selectedOperationId
                 ? 'bg-[#1a2a3a] border-l-2 border-[#6b9fff]'
                 : 'hover:bg-[#181818] border-l-2 border-transparent'
             }`}
           >
-            <div>
-              <span className="text-[#c8c8c8] text-xs block">{op.label}</span>
-              <span className="text-[#555] text-xs">{op.type} · ⌀{op.toolDiameter}mm</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-2 h-2 rounded-full shrink-0" style={swatchStyle(op.color)} />
+              <div className="min-w-0">
+                <span className="text-[#c8c8c8] text-xs block truncate">{op.label}</span>
+                <span className="text-[#555] text-xs">
+                  {op.type} · ⌀{op.toolDiameter}mm
+                  {op.detectedDepth != null && ` · ${op.detectedDepth.toFixed(1)}mm deep`}
+                </span>
+              </div>
             </div>
             <button
               onClick={(e) => { e.stopPropagation(); removeOperation(op.id) }}
-              className="text-[#444] hover:text-[#ff6b6b] text-xs px-1 transition-colors"
+              className="text-[#444] hover:text-[#ff6b6b] text-xs px-1 ml-1 shrink-0 transition-colors"
             >
               ✕
             </button>
           </div>
         ))}
         {operations.length === 0 && (
-          <p className="text-[#444] text-xs px-3 py-3">No operations. Click + Add.</p>
+          <p className="text-[#444] text-xs px-3 py-4 text-center">
+            Compile a model to detect operations.
+          </p>
         )}
       </div>
 
       {/* Operation editor */}
       {selected ? (
         <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          {/* Auto-detected info badge */}
+          {selected.detectedDepth != null && (
+            <div className="bg-[#0d1a0d] border border-[#1a3a1a] rounded px-2 py-1.5 text-[#69f0ae] text-xs space-y-0.5">
+              <div className="flex justify-between">
+                <span className="text-[#3a7a3a]">Detected depth</span>
+                <span>{selected.detectedDepth.toFixed(2)} mm</span>
+              </div>
+              {selected.detectedCount > 1 && (
+                <div className="flex justify-between">
+                  <span className="text-[#3a7a3a]">Features</span>
+                  <span>{selected.detectedCount} locations</span>
+                </div>
+              )}
+            </div>
+          )}
+
           <Field label="Label">
             <input
               type="text"
@@ -143,7 +149,7 @@ export default function OperationsPanel() {
           {selected.type !== 'drill' && (
             <Field label="Direction">
               <select
-                value={selected.direction}
+                value={selected.direction ?? 'climb'}
                 onChange={(e) => updateField('direction', e.target.value)}
                 className={inputClass}
               >
@@ -154,18 +160,12 @@ export default function OperationsPanel() {
             </Field>
           )}
 
-          {selected.type !== 'drill' && (
-            <Field label="Passes (finishing)">
-              <NumInput value={selected.passes} min={1} step={1} onChange={(v) => updateField('passes', Math.round(v))} />
-            </Field>
-          )}
-
           <Divider />
 
           <div className="text-[#555] text-xs space-y-1 pt-1">
             <div className="flex justify-between">
               <span>Z passes</span>
-              <span className="text-[#888]">{Math.ceil(selected.depth / selected.stepdown)}</span>
+              <span className="text-[#888]">{Math.ceil(selected.depth / Math.max(selected.stepdown, 0.001))}</span>
             </div>
             <div className="flex justify-between">
               <span>Total depth</span>
@@ -175,7 +175,7 @@ export default function OperationsPanel() {
         </div>
       ) : (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-[#444] text-xs">Select an operation to edit</p>
+          <p className="text-[#444] text-xs text-center px-4">Select an operation to edit</p>
         </div>
       )}
     </div>

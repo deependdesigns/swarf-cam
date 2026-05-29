@@ -1,5 +1,122 @@
 // Slice an STL (ASCII or binary) at a given Z height and return 2D contour polygons
 
+export function getStlTopZ(stlData) {
+  const buffer = stlData instanceof ArrayBuffer ? stlData : stlData.buffer ?? stlData
+  const firstBytes = new Uint8Array(buffer, 0, Math.min(6, buffer.byteLength))
+  const isAscii = String.fromCharCode(...firstBytes).startsWith('solid')
+  const triangles = isAscii ? parseAsciiStl(buffer) : parseBinaryStl(buffer)
+  let maxZ = -Infinity
+  for (const [v1, v2, v3] of triangles) {
+    if (v1[2] > maxZ) maxZ = v1[2]
+    if (v2[2] > maxZ) maxZ = v2[2]
+    if (v3[2] > maxZ) maxZ = v3[2]
+  }
+  return isFinite(maxZ) ? maxZ : 0
+}
+
+// For each contour from a top-surface slice, return the auto-detected depth (mm from top)
+// by finding upward-facing floor triangles and matching them to their innermost contour.
+export function getFeatureDepths(stlData, topZ, contours) {
+  const buffer = stlData instanceof ArrayBuffer ? stlData : stlData.buffer ?? stlData
+  const firstBytes = new Uint8Array(buffer, 0, Math.min(6, buffer.byteLength))
+  const isAscii = String.fromCharCode(...firstBytes).startsWith('solid')
+  const triangles = isAscii ? parseAsciiStl(buffer) : parseBinaryStl(buffer)
+
+  const EPS = 0.01
+  // Collect upward-facing horizontal triangles below the top surface (pocket floors)
+  const floorTris = []
+  for (const [v1, v2, v3] of triangles) {
+    const z = v1[2]
+    if (Math.abs(v2[2] - z) > EPS || Math.abs(v3[2] - z) > EPS) continue
+    if (z >= topZ - EPS) continue
+    // Cross product Z component gives normal direction; positive = upward
+    const nz = (v2[0]-v1[0])*(v3[1]-v1[1]) - (v2[1]-v1[1])*(v3[0]-v1[0])
+    if (nz <= 0) continue
+    floorTris.push({ z, verts: [[v1[0],v1[1]], [v2[0],v2[1]], [v3[0],v3[1]]] })
+  }
+
+  // Process contours smallest-first so each floor tri is assigned to its innermost match
+  const sortedIdx = contours
+    .map((c, i) => ({ i, area: polygonArea(c) }))
+    .sort((a, b) => a.area - b.area)
+    .map(x => x.i)
+
+  const floorZPerContour = new Float64Array(contours.length) // 0 = no floor found
+  for (const tri of floorTris) {
+    for (const ci of sortedIdx) {
+      const c = contours[ci]
+      if (
+        pointInPolygon(tri.verts[0][0], tri.verts[0][1], c) &&
+        pointInPolygon(tri.verts[1][0], tri.verts[1][1], c) &&
+        pointInPolygon(tri.verts[2][0], tri.verts[2][1], c)
+      ) {
+        if (tri.z > floorZPerContour[ci]) floorZPerContour[ci] = tri.z
+        break
+      }
+    }
+  }
+
+  return contours.map((_, i) =>
+    floorZPerContour[i] > EPS ? topZ - floorZPerContour[i] : topZ
+  )
+}
+
+// Return all unique Z values of upward-facing horizontal triangles (pocket floors)
+export function getFloorZLevels(stlData, topZ) {
+  const buffer = stlData instanceof ArrayBuffer ? stlData : stlData.buffer ?? stlData
+  const firstBytes = new Uint8Array(buffer, 0, Math.min(6, buffer.byteLength))
+  const isAscii = String.fromCharCode(...firstBytes).startsWith('solid')
+  const triangles = isAscii ? parseAsciiStl(buffer) : parseBinaryStl(buffer)
+  const EPS = 0.01
+  const zSet = new Set()
+  for (const [v1, v2, v3] of triangles) {
+    const z = v1[2]
+    if (Math.abs(v2[2] - z) > EPS || Math.abs(v3[2] - z) > EPS) continue
+    if (z >= topZ - EPS || z < EPS) continue
+    const nz = (v2[0]-v1[0])*(v3[1]-v1[1]) - (v2[1]-v1[1])*(v3[0]-v1[0])
+    if (nz <= 0) continue
+    zSet.add(Math.round(z * 10) / 10)
+  }
+  return [...zSet].sort((a, b) => b - a)
+}
+
+// Find depth of highest upward-facing floor triangle within an XY bounding region
+export function getRegionFloorDepth(stlData, topZ, xMin, xMax, yMin, yMax) {
+  const buffer = stlData instanceof ArrayBuffer ? stlData : stlData.buffer ?? stlData
+  const firstBytes = new Uint8Array(buffer, 0, Math.min(6, buffer.byteLength))
+  const isAscii = String.fromCharCode(...firstBytes).startsWith('solid')
+  const triangles = isAscii ? parseAsciiStl(buffer) : parseBinaryStl(buffer)
+  const EPS = 0.01
+  let maxFloorZ = 0
+  for (const [v1, v2, v3] of triangles) {
+    const z = v1[2]
+    if (Math.abs(v2[2] - z) > EPS || Math.abs(v3[2] - z) > EPS) continue
+    if (z >= topZ - EPS || z < EPS) continue
+    const nz = (v2[0]-v1[0])*(v3[1]-v1[1]) - (v2[1]-v1[1])*(v3[0]-v1[0])
+    if (nz <= 0) continue
+    const cx = (v1[0] + v2[0] + v3[0]) / 3
+    const cy = (v1[1] + v2[1] + v3[1]) / 3
+    if (cx >= xMin - EPS && cx <= xMax + EPS && cy >= yMin - EPS && cy <= yMax + EPS) {
+      if (z > maxFloorZ) maxFloorZ = z
+    }
+  }
+  return maxFloorZ > EPS ? topZ - maxFloorZ : topZ
+}
+
+export function polygonArea(polygon) {
+  let area = 0
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    area += (polygon[j][0] + polygon[i][0]) * (polygon[j][1] - polygon[i][1])
+  }
+  return Math.abs(area / 2)
+}
+
+export function polygonCentroid(polygon) {
+  let x = 0, y = 0
+  for (const [px, py] of polygon) { x += px; y += py }
+  return [x / polygon.length, y / polygon.length]
+}
+
 export function extractSliceContours(stlData, sliceZ = 0) {
   // stlData is an ArrayBuffer (may be ASCII STL encoded as UTF-8)
   const buffer = stlData instanceof ArrayBuffer ? stlData : stlData.buffer ?? stlData
@@ -104,4 +221,16 @@ function chainSegments(segments) {
 
 function dist2(a, b) {
   return Math.hypot(a[0] - b[0], a[1] - b[1])
+}
+
+function pointInPolygon(px, py, polygon) {
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i]
+    const [xj, yj] = polygon[j]
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+      inside = !inside
+    }
+  }
+  return inside
 }

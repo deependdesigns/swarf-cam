@@ -1,9 +1,15 @@
 import { useEffect, useRef } from 'react'
 import { useAppState } from '../context/AppStateContext'
-import { initThreeScene, loadStlIntoScene, disposeScene, renderToolpaths, clearToolpaths } from '../lib/threeScene'
+import {
+  initThreeScene, loadStlIntoScene, disposeScene,
+  renderToolpaths, clearToolpaths, highlightOperation,
+} from '../lib/threeScene'
 
 export default function PreviewPanel() {
-  const { stlData, toolpathData, showToolpaths, setShowToolpaths } = useAppState()
+  const {
+    stlData, toolpathData, showToolpaths, setShowToolpaths,
+    selectedOperationId,
+  } = useAppState()
   const mountRef = useRef(null)
   const sceneRef = useRef(null)
 
@@ -23,15 +29,23 @@ export default function PreviewPanel() {
     }
   }, [stlData])
 
-  // Re-render toolpaths whenever data or visibility changes
   useEffect(() => {
     if (!sceneRef.current) return
     if (showToolpaths && toolpathData) {
       renderToolpaths(sceneRef.current, toolpathData)
+      // Apply current selection immediately after render
+      highlightOperation(sceneRef.current, selectedOperationId)
     } else {
       clearToolpaths(sceneRef.current)
     }
   }, [toolpathData, showToolpaths])
+
+  // Highlight changes without re-rendering all paths
+  useEffect(() => {
+    if (sceneRef.current) {
+      highlightOperation(sceneRef.current, selectedOperationId)
+    }
+  }, [selectedOperationId])
 
   return (
     <div className="flex flex-col h-full">

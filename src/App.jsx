@@ -5,6 +5,7 @@ import CodeEditorPanel from './components/CodeEditorPanel'
 import PreviewPanel from './components/PreviewPanel'
 import OperationsPanel from './components/OperationsPanel'
 import GcodePanel from './components/GcodePanel'
+import { detectFeatures } from './lib/gcodeGenerator'
 
 const DEFAULT_SCAD = `// Swarf.cam — OpenSCAD example
 // Edit this code and click Compile to preview
@@ -15,32 +16,25 @@ difference() {
 }
 `
 
-const DEFAULT_OPERATION = {
-  id: 1,
-  type: 'profile',
-  label: 'Profile Cut',
-  toolDiameter: 3.175,
-  feedrate: 1000,
-  spindleSpeed: 18000,
-  stepdown: 1.0,
-  depth: 10.0,
-  passes: 1,
-  direction: 'climb',
-}
-
 export default function App() {
   const [scadCode, setScadCode] = useState(DEFAULT_SCAD)
   const [stlData, setStlData] = useState(null)
   const [compiling, setCompiling] = useState(false)
   const [compileError, setCompileError] = useState(null)
-  const [operations, setOperations] = useState([DEFAULT_OPERATION])
+  const [operations, setOperations] = useState([])
   const [gcode, setGcode] = useState('')
   const [postProcessor, setPostProcessor] = useState('grbl')
   const [toolpathData, setToolpathData] = useState(null)
   const [showToolpaths, setShowToolpaths] = useState(true)
+  const [selectedOperationId, setSelectedOperationId] = useState(null)
 
   const handleStlReady = useCallback((data) => {
     setStlData(data)
+    if (data) {
+      const detected = detectFeatures(data)
+      setOperations(detected)
+      setSelectedOperationId(detected[0]?.id ?? null)
+    }
   }, [])
 
   return (
@@ -54,6 +48,7 @@ export default function App() {
       postProcessor, setPostProcessor,
       toolpathData, setToolpathData,
       showToolpaths, setShowToolpaths,
+      selectedOperationId, setSelectedOperationId,
     }}>
       <div className="flex flex-col h-full bg-[#0d0d0d]">
         <Header />

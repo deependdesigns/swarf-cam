@@ -84,33 +84,53 @@ export function clearToolpaths(state) {
   })
   state.scene.remove(state.toolpathGroup)
   state.toolpathGroup = null
+  state.opGroups = []
 }
 
 export function renderToolpaths(state, toolpathData) {
   clearToolpaths(state)
   if (!toolpathData?.length) return
 
-  // Anchor toolpath Z to the top of the loaded model
   let topY = 0
   if (state.mesh) {
     topY = new THREE.Box3().setFromObject(state.mesh).max.y
   }
 
   const group = new THREE.Group()
+  state.opGroups = []
 
   for (const op of toolpathData) {
-    const mat = new THREE.LineBasicMaterial({ color: op.color })
+    const opGroup = new THREE.Group()
+    opGroup.userData.operationId = op.operationId
+    // Each op gets its own material so we can change opacity independently
+    const mat = new THREE.LineBasicMaterial({ color: op.color, transparent: true, opacity: 1 })
+    opGroup.userData.mat = mat
+
     for (const polyline of op.paths) {
-      // Coordinate transform: STL (x,y,z_depth) → Three.js (x, topY+z_depth, -y)
-      // because mesh.rotation.x = -π/2 maps STL-Z to Three.js-Y and flips STL-Y to -Z
-      const pts = polyline.map(([x, y, z]) => new THREE.Vector3(x, topY + z, -y))
+      const cx = state.stlCenter?.x ?? 0
+      const cy = state.stlCenter?.y ?? 0
+      const pts = polyline.map(([x, y, z]) => new THREE.Vector3(x - cx, topY + z, -(y - cy)))
       const geo = new THREE.BufferGeometry().setFromPoints(pts)
-      group.add(new THREE.Line(geo, mat))
+      opGroup.add(new THREE.Line(geo, mat))
     }
+
+    group.add(opGroup)
+    state.opGroups.push(opGroup)
   }
 
   state.scene.add(group)
   state.toolpathGroup = group
+}
+
+// Highlight one operation's paths; dim all others. Pass null to reset all to full opacity.
+export function highlightOperation(state, operationId) {
+  if (!state.opGroups?.length) return
+  for (const opGroup of state.opGroups) {
+    const mat = opGroup.userData.mat
+    if (!mat) continue
+    const isSelected = operationId == null || opGroup.userData.operationId === operationId
+    mat.opacity = isSelected ? 1.0 : 0.12
+  }
 }
 
 export function loadStlIntoScene(state, stlArrayBuffer) {
@@ -128,6 +148,10 @@ export function loadStlIntoScene(state, stlArrayBuffer) {
   const loader = new STLLoader()
   const geometry = loader.parse(stlArrayBuffer)
   geometry.computeVertexNormals()
+  geometry.computeBoundingBox()
+  const stlCenter = new THREE.Vector3()
+  geometry.boundingBox.getCenter(stlCenter)
+  state.stlCenter = stlCenter
   geometry.center()
 
   const material = new THREE.MeshStandardMaterial({
