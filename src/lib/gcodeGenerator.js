@@ -8,6 +8,20 @@ import { offsetContours } from './toolpathOffsets'
 
 const OP_COLORS = [0x00e5ff, 0xffab40, 0x69f0ae, 0xff4081, 0xea80fc, 0xffd740, 0x40c4ff, 0xe040fb]
 
+// ── Effective operation (merges per-op overrides on top of global tool settings) ─
+
+export function effectiveOp(op, globalTool) {
+  return {
+    ...op,
+    toolDiameter: op.overrides?.toolDiameter ?? globalTool.toolDiameter,
+    feedrate:     op.overrides?.feedrate     ?? globalTool.feedrate,
+    spindleSpeed: op.overrides?.spindleSpeed ?? globalTool.spindleSpeed,
+    stepdown:     op.overrides?.stepdown     ?? globalTool.stepdown,
+    stepover:     op.overrides?.stepover     ?? globalTool.stepover,
+    direction:    op.overrides?.direction    ?? globalTool.direction,
+  }
+}
+
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
 function classifyContours(contours) {
@@ -74,9 +88,8 @@ function findContoursForOp(contours, isOuter, op) {
 
 // ── Toolpath generators ───────────────────────────────────────────────────────
 
-// Concentric pocket passes expanding from center outward.
-function generatePocketPasses(contour, toolRadius) {
-  const stepover = Math.max(toolRadius * 0.85, 0.01)
+function generatePocketPasses(contour, toolRadius, stepoverPct) {
+  const stepover = Math.max(toolRadius * (stepoverPct / 100), 0.01)
   const inward = []
   for (let dist = toolRadius; ; dist += stepover) {
     const ocs = offsetContours([contour], -dist)
@@ -84,18 +97,16 @@ function generatePocketPasses(contour, toolRadius) {
     if (ocs.reduce((s, c) => s + polygonArea(c), 0) < 0.5) break
     inward.push(ocs)
   }
-  inward.reverse()  // innermost (smallest) first → center outward
+  inward.reverse()
   return inward.flat()
 }
 
-// Open slot: serpentine Y passes across slot width, extending past each Y edge by toolRadius.
-function generateSlotPasses(slotBounds, toolRadius) {
+function generateSlotPasses(slotBounds, toolRadius, stepoverPct) {
   const { xMin, xMax, yMin, yMax } = slotBounds
-  const stepover = Math.max(toolRadius * 0.85, 0.01)
+  const stepover = Math.max(toolRadius * (stepoverPct / 100), 0.01)
   const slotCenterX = (xMin + xMax) / 2
   const maxHalfWidth = (xMax - xMin) / 2 - toolRadius
 
-  // Build X offsets from center outward: [0, -s, +s, -2s, +2s, ...]
   const offsets = [0]
   for (let off = stepover; off <= maxHalfWidth + 0.01; off += stepover) {
     offsets.push(-off)
@@ -111,8 +122,6 @@ function generateSlotPasses(slotBounds, toolRadius) {
   })
 }
 
-// Detect open slots: pairs of outer contours at the top surface that share a Y range
-// but have an X gap between them, with a detectable floor in the gap (not just air between pieces).
 function detectOpenSlots(outerContours, stlArrayBuffer, topZ) {
   const slots = []
   const bboxes = outerContours.map(getBbox)
@@ -138,7 +147,6 @@ function detectOpenSlots(outerContours, stlArrayBuffer, topZ) {
       const yMin = Math.max(ba.yMin, bb.yMin)
       const yMax = Math.min(ba.yMax, bb.yMax)
 
-      // Require a physical floor inside the gap — otherwise it's just a gap between separate pieces
       const depth = getRegionFloorDepth(stlArrayBuffer, topZ, gapXMin, gapXMax, yMin, yMax)
       if (depth >= topZ - 0.5) continue
 
@@ -175,13 +183,9 @@ export function detectFeatures(stlArrayBuffer) {
           detectedDepth: topZ,
           detectedCount: 1,
           color: OP_COLORS[colorIdx++ % OP_COLORS.length],
-          toolDiameter: 3.175,
-          feedrate: 1000,
-          spindleSpeed: 18000,
-          stepdown: 1.0,
           depth: Math.ceil(topZ),
-          passes: 1,
-          direction: 'climb',
+          enabled: true,
+          overrides: {},
         })
       })
   }
@@ -200,25 +204,18 @@ export function detectFeatures(stlArrayBuffer) {
         detectedDepth: slot.depth,
         detectedCount: 1,
         color: OP_COLORS[colorIdx++ % OP_COLORS.length],
-        toolDiameter: 3.175,
-        feedrate: 800,
-        spindleSpeed: 18000,
-        stepdown: 0.5,
         depth: Math.ceil(slot.depth * 10) / 10,
-        passes: 1,
-        direction: 'climb',
+        enabled: true,
+        overrides: {},
       })
     }
   }
 
-  // ── Pocket / Drill: scan at topZ-0.01 AND just below each pocket floor ────
-  // Scanning below floors reveals thread holes hidden inside counterbores.
+  // ── Pocket / Drill ────────────────────────────────────────────────────────
   const floorZs = getFloorZLevels(stlArrayBuffer, topZ)
   const scanZSet = new Set([Math.round((topZ - 0.01) * 100) / 100])
   for (const fz of floorZs) scanZSet.add(Math.round((fz - 0.05) * 100) / 100)
 
-  // [cx, cy, r] — deduplicate by position AND radius so thread holes under counterbores
-  // (same XY, different radius) are not mistaken for duplicates.
   const knownFeatures = []
   const groups = new Map()
 
@@ -234,7 +231,6 @@ export function detectFeatures(stlArrayBuffer) {
       if (isOuter[ci]) continue
       const { cx, cy, r } = circleFromContour(contours[ci])
 
-      // Deduplicate: skip if a feature at the same XY center AND similar radius was already found
       if (knownFeatures.some(([kx, ky, kr]) =>
         Math.hypot(kx - cx, ky - cy) < 1.5 && Math.abs(kr - r) < 1.0)) continue
       knownFeatures.push([cx, cy, r])
@@ -275,13 +271,9 @@ export function detectFeatures(stlArrayBuffer) {
       detectedDepth: g.depth,
       detectedCount: count,
       color: OP_COLORS[g.colorIdx % OP_COLORS.length],
-      toolDiameter: g.type === 'drill' ? Math.min(g.diameter * 0.8, 3.175) : 3.175,
-      feedrate: g.type === 'drill' ? 300 : 800,
-      spindleSpeed: 18000,
-      stepdown: g.type === 'drill' ? g.depth : 0.5,
       depth: Math.ceil(g.depth * 10) / 10,
-      passes: 1,
-      direction: 'climb',
+      enabled: true,
+      overrides: {},
     })
   }
 
@@ -290,62 +282,61 @@ export function detectFeatures(stlArrayBuffer) {
 
 // ── Toolpath visualization data ───────────────────────────────────────────────
 
-export function computeToolpathData(stlArrayBuffer, operations) {
+export function computeToolpathData(stlArrayBuffer, operations, globalToolSettings) {
   const result = []
 
   for (let i = 0; i < operations.length; i++) {
     const op = operations[i]
-    const color = op.color ?? OP_COLORS[i % OP_COLORS.length]
-    const paths = []
-    const stepdown = Math.max(op.stepdown, 0.001)
+    if (op.enabled === false) continue
 
-    // Drill: vertical lines at each detected centroid, no STL re-slicing needed
-    if (op.type === 'drill') {
-      const centroids = op.centroids ?? (op.centroid ? [op.centroid] : [])
+    const eop = effectiveOp(op, globalToolSettings)
+    const color = eop.color ?? OP_COLORS[i % OP_COLORS.length]
+    const paths = []
+    const stepdown = Math.max(eop.stepdown, 0.001)
+    const toolRadius = eop.toolDiameter / 2
+
+    if (eop.type === 'drill') {
+      const centroids = eop.centroids ?? (eop.centroid ? [eop.centroid] : [])
       for (const [cx, cy] of centroids) {
-        paths.push([[cx, cy, 0], [cx, cy, -op.depth]])
+        paths.push([[cx, cy, 0], [cx, cy, -eop.depth]])
       }
-      result.push({ label: op.label, color, paths, operationId: op.id })
+      result.push({ label: eop.label, color, paths, operationId: eop.id })
       continue
     }
 
-    // Slot: parallel Y-axis passes across slot width
-    if (op.type === 'slot' && op.slotBounds) {
-      const toolRadius = op.toolDiameter / 2
-      const effectiveDepth = Math.min(op.depth, op.slotBounds.depth)
+    if (eop.type === 'slot' && eop.slotBounds) {
+      const effectiveDepth = Math.min(eop.depth, eop.slotBounds.depth)
       const zPasses = Math.ceil(effectiveDepth / stepdown)
-      const slotPasses = generateSlotPasses(op.slotBounds, toolRadius)
+      const slotPasses = generateSlotPasses(eop.slotBounds, toolRadius, eop.stepover)
       for (let pass = 1; pass <= zPasses; pass++) {
         const z = -Math.min(pass * stepdown, effectiveDepth)
         for (const [[x1, y1], [x2, y2]] of slotPasses) {
           paths.push([[x1, y1, z], [x2, y2, z]])
         }
       }
-      result.push({ label: op.label, color, paths, operationId: op.id })
+      result.push({ label: eop.label, color, paths, operationId: eop.id })
       continue
     }
 
-    // Profile / Pocket: STL-contour based
     const topZ = getStlTopZ(stlArrayBuffer)
-    const sliceZ = op.type === 'profile' ? 0.01 : topZ - 0.01
+    const sliceZ = eop.type === 'profile' ? 0.01 : topZ - 0.01
     const contours = extractSliceContours(stlArrayBuffer, sliceZ)
-    if (contours.length === 0) { result.push({ label: op.label, color, paths, operationId: op.id }); continue }
+    if (contours.length === 0) { result.push({ label: eop.label, color, paths, operationId: eop.id }); continue }
 
-    const featureDepths = op.type === 'profile'
+    const featureDepths = eop.type === 'profile'
       ? contours.map(() => topZ)
       : getFeatureDepths(stlArrayBuffer, topZ, contours)
     const isOuter = classifyContours(contours)
-    const toolRadius = op.toolDiameter / 2
 
-    for (const ci of findContoursForOp(contours, isOuter, op)) {
-      if (op.type === 'profile' && !isOuter[ci]) continue
-      if (op.type === 'pocket' && isOuter[ci]) continue
-      const effectiveDepth = Math.min(op.depth, featureDepths[ci])
+    for (const ci of findContoursForOp(contours, isOuter, eop)) {
+      if (eop.type === 'profile' && !isOuter[ci]) continue
+      if (eop.type === 'pocket' && isOuter[ci]) continue
+      const effectiveDepth = Math.min(eop.depth, featureDepths[ci])
       if (effectiveDepth <= 0) continue
       const zPasses = Math.ceil(effectiveDepth / stepdown)
 
-      const toolpaths = op.type === 'pocket'
-        ? generatePocketPasses(contours[ci], toolRadius)
+      const toolpaths = eop.type === 'pocket'
+        ? generatePocketPasses(contours[ci], toolRadius, eop.stepover)
         : offsetContours([contours[ci]], toolRadius)
 
       for (let pass = 1; pass <= zPasses; pass++) {
@@ -359,7 +350,7 @@ export function computeToolpathData(stlArrayBuffer, operations) {
       }
     }
 
-    result.push({ label: op.label, color, paths, operationId: op.id })
+    result.push({ label: eop.label, color, paths, operationId: eop.id })
   }
 
   return result
@@ -367,34 +358,42 @@ export function computeToolpathData(stlArrayBuffer, operations) {
 
 // ── G-code generation ─────────────────────────────────────────────────────────
 
-export function generateGcode(stlArrayBuffer, operations, postProcessorId) {
+export function generateGcode(stlArrayBuffer, operations, postProcessorId, globalToolSettings, machineSettings) {
   const pp = getPostProcessor(postProcessorId)
+  const zBase = machineSettings.zZeroMode === 'spoilboard' ? machineSettings.materialThickness : 0
+  const safeZ = zBase + machineSettings.safetyHeight
+  const originSafeZ = zBase + machineSettings.originSafetyHeight
   const lines = []
 
-  for (const op of operations) {
-    lines.push(pp.header(op))
+  const enabledOps = operations.filter(op => op.enabled !== false)
+
+  for (const op of enabledOps) {
+    const eop = effectiveOp(op, globalToolSettings)
+    lines.push(pp.header(eop))
     lines.push('')
-    lines.push(pp.comment(`=== ${op.label} ===`))
+    lines.push(pp.comment(`=== ${eop.label} ===`))
 
     const opLines =
-      op.type === 'drill' ? generateDrill(op, pp) :
-      op.type === 'slot'  ? generateSlot(op, pp) :
-      generateMillingOp(stlArrayBuffer, op, pp)
+      eop.type === 'drill' ? generateDrill(eop, pp, safeZ, originSafeZ, machineSettings, zBase) :
+      eop.type === 'slot'  ? generateSlot(eop, pp, safeZ, originSafeZ, machineSettings, zBase) :
+      generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, machineSettings, zBase)
 
     for (const line of opLines) lines.push(line)
-    lines.push(pp.footer())
+    lines.push(pp.footer(originSafeZ))
     lines.push('')
   }
 
   return lines.join('\n')
 }
 
-function generateMillingOp(stlArrayBuffer, op, pp) {
+function ox(x, ms) { return x + ms.xOffset }
+function oy(y, ms) { return y + ms.yOffset }
+
+function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBase) {
   const lines = []
-  const stepdown = Math.max(op.stepdown, 0.001)
-  const safeZ = 5.0
+  const stepdown = Math.max(eop.stepdown, 0.001)
   const topZ = getStlTopZ(stlArrayBuffer)
-  const sliceZ = op.type === 'profile' ? 0.01 : topZ - 0.01
+  const sliceZ = eop.type === 'profile' ? 0.01 : topZ - 0.01
   const contours = extractSliceContours(stlArrayBuffer, sliceZ)
 
   if (contours.length === 0) {
@@ -402,38 +401,38 @@ function generateMillingOp(stlArrayBuffer, op, pp) {
     return lines
   }
 
-  const featureDepths = op.type === 'profile'
+  const featureDepths = eop.type === 'profile'
     ? contours.map(() => topZ)
     : getFeatureDepths(stlArrayBuffer, topZ, contours)
   const isOuter = classifyContours(contours)
-  const toolRadius = op.toolDiameter / 2
+  const toolRadius = eop.toolDiameter / 2
 
-  lines.push(pp.rapidTo(undefined, undefined, safeZ))
+  lines.push(pp.rapidTo(undefined, undefined, originSafeZ))
 
-  for (const ci of findContoursForOp(contours, isOuter, op)) {
-    if (op.type === 'profile' && !isOuter[ci]) continue
-    if (op.type === 'pocket' && isOuter[ci]) continue
-    const effectiveDepth = Math.min(op.depth, featureDepths[ci])
+  for (const ci of findContoursForOp(contours, isOuter, eop)) {
+    if (eop.type === 'profile' && !isOuter[ci]) continue
+    if (eop.type === 'pocket' && isOuter[ci]) continue
+    const effectiveDepth = Math.min(eop.depth, featureDepths[ci])
     if (effectiveDepth <= 0) continue
     const zPasses = Math.ceil(effectiveDepth / stepdown)
 
-    const toolpaths = op.type === 'pocket'
-      ? generatePocketPasses(contours[ci], toolRadius)
+    const toolpaths = eop.type === 'pocket'
+      ? generatePocketPasses(contours[ci], toolRadius, eop.stepover)
       : offsetContours([contours[ci]], toolRadius)
 
     for (let pass = 1; pass <= zPasses; pass++) {
-      const z = -Math.min(pass * stepdown, effectiveDepth)
-      lines.push(pp.comment(`Feature ${ci + 1} pass ${pass}/${zPasses} — depth ${Math.abs(z).toFixed(3)} mm`))
+      const cutZ = zBase - Math.min(pass * stepdown, effectiveDepth)
+      lines.push(pp.comment(`Feature ${ci + 1} pass ${pass}/${zPasses} — depth ${(zBase - cutZ).toFixed(3)} mm`))
 
       for (const path of toolpaths) {
         if (path.length < 2) continue
         const [startX, startY] = path[0]
-        lines.push(pp.rapidTo(startX, startY, safeZ))
-        lines.push(pp.linearTo(undefined, undefined, z, op.feedrate * 0.3))
+        lines.push(pp.rapidTo(ox(startX, ms), oy(startY, ms), safeZ))
+        lines.push(pp.linearTo(undefined, undefined, cutZ, eop.feedrate * 0.3))
         for (let k = 1; k < path.length; k++) {
-          lines.push(pp.linearTo(path[k][0], path[k][1], undefined, op.feedrate))
+          lines.push(pp.linearTo(ox(path[k][0], ms), oy(path[k][1], ms), undefined, eop.feedrate))
         }
-        lines.push(pp.linearTo(startX, startY, undefined, op.feedrate))
+        lines.push(pp.linearTo(ox(startX, ms), oy(startY, ms), undefined, eop.feedrate))
         lines.push(pp.rapidTo(undefined, undefined, safeZ))
       }
     }
@@ -442,50 +441,47 @@ function generateMillingOp(stlArrayBuffer, op, pp) {
   return lines
 }
 
-// Drill uses stored centroids directly — no re-slicing needed since thread holes
-// may not be visible at the top surface (they're inside counterbore voids).
-function generateDrill(op, pp) {
+function generateDrill(eop, pp, safeZ, originSafeZ, ms, zBase) {
   const lines = []
-  const safeZ = 5.0
-  const centroids = op.centroids ?? (op.centroid ? [op.centroid] : [])
+  const centroids = eop.centroids ?? (eop.centroid ? [eop.centroid] : [])
 
   if (centroids.length === 0) {
     lines.push(pp.comment('No drill locations'))
     return lines
   }
 
-  lines.push(pp.rapidTo(undefined, undefined, safeZ))
+  lines.push(pp.rapidTo(undefined, undefined, originSafeZ))
   for (const [cx, cy] of centroids) {
-    lines.push(pp.comment(`Drill X${cx.toFixed(3)} Y${cy.toFixed(3)} depth ${op.depth.toFixed(3)}`))
-    lines.push(pp.rapidTo(cx, cy, safeZ))
-    lines.push(pp.linearTo(undefined, undefined, -op.depth, op.feedrate * 0.5))
+    const cutZ = zBase - eop.depth
+    lines.push(pp.comment(`Drill X${cx.toFixed(3)} Y${cy.toFixed(3)} depth ${eop.depth.toFixed(3)}`))
+    lines.push(pp.rapidTo(ox(cx, ms), oy(cy, ms), safeZ))
+    lines.push(pp.linearTo(undefined, undefined, cutZ, eop.feedrate * 0.5))
     lines.push(pp.rapidTo(undefined, undefined, safeZ))
   }
 
   return lines
 }
 
-function generateSlot(op, pp) {
+function generateSlot(eop, pp, safeZ, originSafeZ, ms, zBase) {
   const lines = []
-  const safeZ = 5.0
-  const { slotBounds } = op
+  const { slotBounds } = eop
   if (!slotBounds) { lines.push(pp.comment('No slot bounds')); return lines }
 
-  const stepdown = Math.max(op.stepdown, 0.001)
-  const toolRadius = op.toolDiameter / 2
-  const effectiveDepth = Math.min(op.depth, slotBounds.depth)
+  const stepdown = Math.max(eop.stepdown, 0.001)
+  const toolRadius = eop.toolDiameter / 2
+  const effectiveDepth = Math.min(eop.depth, slotBounds.depth)
   const zPasses = Math.ceil(effectiveDepth / stepdown)
-  const slotPasses = generateSlotPasses(slotBounds, toolRadius)
+  const slotPasses = generateSlotPasses(slotBounds, toolRadius, eop.stepover)
 
-  lines.push(pp.rapidTo(undefined, undefined, safeZ))
+  lines.push(pp.rapidTo(undefined, undefined, originSafeZ))
 
   for (let pass = 1; pass <= zPasses; pass++) {
-    const z = -Math.min(pass * stepdown, effectiveDepth)
-    lines.push(pp.comment(`Slot pass ${pass}/${zPasses} — depth ${Math.abs(z).toFixed(3)} mm`))
+    const cutZ = zBase - Math.min(pass * stepdown, effectiveDepth)
+    lines.push(pp.comment(`Slot pass ${pass}/${zPasses} — depth ${(zBase - cutZ).toFixed(3)} mm`))
     for (const [[x1, y1], [x2, y2]] of slotPasses) {
-      lines.push(pp.rapidTo(x1, y1, safeZ))
-      lines.push(pp.linearTo(undefined, undefined, z, op.feedrate * 0.3))
-      lines.push(pp.linearTo(x2, y2, undefined, op.feedrate))
+      lines.push(pp.rapidTo(ox(x1, ms), oy(y1, ms), safeZ))
+      lines.push(pp.linearTo(undefined, undefined, cutZ, eop.feedrate * 0.3))
+      lines.push(pp.linearTo(ox(x2, ms), oy(y2, ms), undefined, eop.feedrate))
       lines.push(pp.rapidTo(undefined, undefined, safeZ))
     }
   }

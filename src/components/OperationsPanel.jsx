@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import { useAppState } from '../context/AppStateContext'
+import { effectiveOp } from '../lib/gcodeGenerator'
 
 const OP_TYPES = [
   { id: 'profile', label: 'Profile' },
@@ -12,7 +14,15 @@ const DIRECTIONS = [
   { id: 'conventional', label: 'Conventional' },
 ]
 
-// Swatch color from the hex number stored on each operation
+const OVERRIDE_FIELDS = [
+  { key: 'toolDiameter', label: 'Tool Diameter (mm)', min: 0.1, step: 0.025, type: 'number' },
+  { key: 'feedrate',     label: 'Feedrate (mm/min)',  min: 1,   step: 10,    type: 'number' },
+  { key: 'spindleSpeed', label: 'Spindle Speed (RPM)', min: 100, step: 100,  type: 'number' },
+  { key: 'stepdown',     label: 'Stepdown (mm)',       min: 0.01, step: 0.1, type: 'number' },
+  { key: 'stepover',     label: 'Stepover (%)',        min: 1,   step: 5, max: 100, type: 'number' },
+  { key: 'direction',    label: 'Direction',           type: 'select', options: DIRECTIONS },
+]
+
 function swatchStyle(color) {
   return { background: color ? `#${color.toString(16).padStart(6, '0')}` : '#6b9fff' }
 }
@@ -21,23 +31,52 @@ export default function OperationsPanel() {
   const {
     operations, setOperations,
     selectedOperationId, setSelectedOperationId,
+    globalToolSettings,
   } = useAppState()
 
-  const selected = operations.find((op) => op.id === selectedOperationId)
+  const [editingId, setEditingId] = useState(null)
 
-  function removeOperation(id) {
-    setOperations((ops) => {
-      const next = ops.filter((op) => op.id !== id)
-      if (id === selectedOperationId) setSelectedOperationId(next[0]?.id ?? null)
-      return next
-    })
+  const selected = operations.find(op => op.id === selectedOperationId)
+
+  function toggleEnabled(id) {
+    setOperations(ops =>
+      ops.map(op => op.id === id ? { ...op, enabled: op.enabled === false ? true : false } : op)
+    )
   }
 
   function updateField(field, value) {
-    setOperations((ops) =>
-      ops.map((op) => (op.id === selectedOperationId ? { ...op, [field]: value } : op))
+    setOperations(ops =>
+      ops.map(op => op.id === selectedOperationId ? { ...op, [field]: value } : op)
     )
   }
+
+  function setOverride(field, value) {
+    setOperations(ops =>
+      ops.map(op => op.id === selectedOperationId
+        ? { ...op, overrides: { ...op.overrides, [field]: value } }
+        : op
+      )
+    )
+  }
+
+  function clearOverride(field) {
+    setOperations(ops =>
+      ops.map(op => {
+        if (op.id !== selectedOperationId) return op
+        const next = { ...op.overrides }
+        delete next[field]
+        return { ...op, overrides: next }
+      })
+    )
+  }
+
+  function clearAllOverrides() {
+    setOperations(ops =>
+      ops.map(op => op.id === selectedOperationId ? { ...op, overrides: {} } : op)
+    )
+  }
+
+  const isEditing = editingId === selectedOperationId
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -47,34 +86,43 @@ export default function OperationsPanel() {
 
       {/* Operation list */}
       <div className="border-b border-[#2a2a2a] overflow-y-auto max-h-[45%] shrink-0">
-        {operations.map((op) => (
-          <div
-            key={op.id}
-            onClick={() => setSelectedOperationId(op.id)}
-            className={`flex items-center justify-between px-3 py-2 cursor-pointer transition-colors ${
-              op.id === selectedOperationId
-                ? 'bg-[#1a2a3a] border-l-2 border-[#6b9fff]'
-                : 'hover:bg-[#181818] border-l-2 border-transparent'
-            }`}
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <div className="w-2 h-2 rounded-full shrink-0" style={swatchStyle(op.color)} />
-              <div className="min-w-0">
-                <span className="text-[#c8c8c8] text-xs block truncate">{op.label}</span>
-                <span className="text-[#555] text-xs">
-                  {op.type} · ⌀{op.toolDiameter}mm
-                  {op.detectedDepth != null && ` · ${op.detectedDepth.toFixed(1)}mm deep`}
-                </span>
-              </div>
-            </div>
-            <button
-              onClick={(e) => { e.stopPropagation(); removeOperation(op.id) }}
-              className="text-[#444] hover:text-[#ff6b6b] text-xs px-1 ml-1 shrink-0 transition-colors"
+        {operations.map(op => {
+          const eop = effectiveOp(op, globalToolSettings)
+          const disabled = op.enabled === false
+          return (
+            <div
+              key={op.id}
+              onClick={() => { setSelectedOperationId(op.id); setEditingId(null) }}
+              className={`flex items-center justify-between px-3 py-2 cursor-pointer transition-colors ${
+                op.id === selectedOperationId
+                  ? 'bg-[#1a2a3a] border-l-2 border-[#6b9fff]'
+                  : 'hover:bg-[#181818] border-l-2 border-transparent'
+              } ${disabled ? 'opacity-40' : ''}`}
             >
-              ✕
-            </button>
-          </div>
-        ))}
+              <div className="flex items-center gap-2 min-w-0">
+                {/* Enable toggle */}
+                <input
+                  type="checkbox"
+                  checked={!disabled}
+                  onChange={e => { e.stopPropagation(); toggleEnabled(op.id) }}
+                  onClick={e => e.stopPropagation()}
+                  className="shrink-0 accent-[#6b9fff] cursor-pointer"
+                />
+                <div className="w-2 h-2 rounded-full shrink-0" style={swatchStyle(op.color)} />
+                <div className="min-w-0">
+                  <span className="text-[#c8c8c8] text-xs block truncate">{op.label}</span>
+                  <span className="text-[#555] text-xs">
+                    {op.type} · ⌀{eop.toolDiameter}mm
+                    {op.detectedDepth != null && ` · ${op.detectedDepth.toFixed(1)}mm`}
+                  </span>
+                </div>
+              </div>
+              {Object.keys(op.overrides ?? {}).length > 0 && (
+                <span className="text-[#6b9fff] text-xs shrink-0 ml-1" title="Has overrides">✦</span>
+              )}
+            </div>
+          )
+        })}
         {operations.length === 0 && (
           <p className="text-[#444] text-xs px-3 py-4 text-center">
             Compile a model to detect operations.
@@ -82,10 +130,11 @@ export default function OperationsPanel() {
         )}
       </div>
 
-      {/* Operation editor */}
+      {/* Operation detail */}
       {selected ? (
         <div className="flex-1 overflow-y-auto p-3 space-y-3">
-          {/* Auto-detected info badge */}
+
+          {/* Detected info */}
           {selected.detectedDepth != null && (
             <div className="bg-[#0d1a0d] border border-[#1a3a1a] rounded px-2 py-1.5 text-[#69f0ae] text-xs space-y-0.5">
               <div className="flex justify-between">
@@ -105,7 +154,7 @@ export default function OperationsPanel() {
             <input
               type="text"
               value={selected.label}
-              onChange={(e) => updateField('label', e.target.value)}
+              onChange={e => updateField('label', e.target.value)}
               className={inputClass}
             />
           </Field>
@@ -113,65 +162,133 @@ export default function OperationsPanel() {
           <Field label="Type">
             <select
               value={selected.type}
-              onChange={(e) => updateField('type', e.target.value)}
+              onChange={e => updateField('type', e.target.value)}
               className={inputClass}
             >
-              {OP_TYPES.map((t) => (
+              {OP_TYPES.map(t => (
                 <option key={t.id} value={t.id}>{t.label}</option>
               ))}
             </select>
           </Field>
 
-          <Divider />
-
-          <Field label="Tool Diameter (mm)">
-            <NumInput value={selected.toolDiameter} min={0.1} step={0.025} onChange={(v) => updateField('toolDiameter', v)} />
-          </Field>
-
-          <Field label="Feedrate (mm/min)">
-            <NumInput value={selected.feedrate} min={1} step={10} onChange={(v) => updateField('feedrate', v)} />
-          </Field>
-
-          <Field label="Spindle Speed (RPM)">
-            <NumInput value={selected.spindleSpeed} min={100} step={100} onChange={(v) => updateField('spindleSpeed', v)} />
-          </Field>
-
-          <Divider />
-
           <Field label="Depth (mm)">
-            <NumInput value={selected.depth} min={0.01} step={0.5} onChange={(v) => updateField('depth', v)} />
+            <input
+              type="number"
+              value={selected.depth}
+              min={0.01}
+              step={0.5}
+              onChange={e => {
+                const v = parseFloat(e.target.value)
+                updateField('depth', isNaN(v) ? 0.01 : v)
+              }}
+              className={inputClass}
+            />
           </Field>
 
-          <Field label="Stepdown (mm)">
-            <NumInput value={selected.stepdown} min={0.01} step={0.1} onChange={(v) => updateField('stepdown', v)} />
-          </Field>
-
-          {selected.type !== 'drill' && (
-            <Field label="Direction">
-              <select
-                value={selected.direction ?? 'climb'}
-                onChange={(e) => updateField('direction', e.target.value)}
-                className={inputClass}
-              >
-                {DIRECTIONS.map((d) => (
-                  <option key={d.id} value={d.id}>{d.label}</option>
-                ))}
-              </select>
-            </Field>
-          )}
-
-          <Divider />
-
-          <div className="text-[#555] text-xs space-y-1 pt-1">
-            <div className="flex justify-between">
-              <span>Z passes</span>
-              <span className="text-[#888]">{Math.ceil(selected.depth / Math.max(selected.stepdown, 0.001))}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Total depth</span>
-              <span className="text-[#888]">{selected.depth.toFixed(2)} mm</span>
-            </div>
+          <div className="text-[#555] text-xs">
+            Z passes: {Math.ceil(selected.depth / Math.max(effectiveOp(selected, globalToolSettings).stepdown, 0.001))}
           </div>
+
+          <div className="border-t border-[#1e1e1e]" />
+
+          {/* Tool overrides */}
+          <div className="flex items-center justify-between">
+            <span className="text-[#666] text-xs uppercase tracking-wider">Tool Settings</span>
+            {isEditing ? (
+              <div className="flex gap-2">
+                {Object.keys(selected.overrides ?? {}).length > 0 && (
+                  <button
+                    onClick={clearAllOverrides}
+                    className="text-[#ff6b6b] text-xs hover:text-[#ff9999] transition-colors"
+                  >
+                    Reset all
+                  </button>
+                )}
+                <button
+                  onClick={() => setEditingId(null)}
+                  className="text-[#6b9fff] text-xs hover:text-[#99c2ff] transition-colors"
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setEditingId(selected.id)}
+                className="text-[#6b9fff] text-xs hover:text-[#99c2ff] transition-colors"
+              >
+                {Object.keys(selected.overrides ?? {}).length > 0 ? 'Edit overrides' : 'Override'}
+              </button>
+            )}
+          </div>
+
+          {isEditing ? (
+            <div className="space-y-2.5">
+              {OVERRIDE_FIELDS.map(f => {
+                if (f.key === 'direction' && selected.type === 'drill') return null
+                const hasOverride = (selected.overrides ?? {})[f.key] !== undefined
+                const eop = effectiveOp(selected, globalToolSettings)
+                return (
+                  <div key={f.key} className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <label className={`text-xs ${hasOverride ? 'text-[#6b9fff]' : 'text-[#666]'}`}>
+                        {f.label}
+                        {hasOverride && <span className="ml-1 text-[#6b9fff]">✦</span>}
+                      </label>
+                      {hasOverride && (
+                        <button
+                          onClick={() => clearOverride(f.key)}
+                          className="text-[#555] hover:text-[#ff6b6b] text-xs transition-colors"
+                          title="Reset to global"
+                        >
+                          ↩ global
+                        </button>
+                      )}
+                    </div>
+                    {f.type === 'select' ? (
+                      <select
+                        value={eop[f.key]}
+                        onChange={e => setOverride(f.key, e.target.value)}
+                        className={inputClass}
+                      >
+                        {f.options.map(o => (
+                          <option key={o.id} value={o.id}>{o.label}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="number"
+                        value={eop[f.key]}
+                        min={f.min}
+                        max={f.max}
+                        step={f.step}
+                        onChange={e => {
+                          const v = parseFloat(e.target.value)
+                          setOverride(f.key, isNaN(v) ? (f.min ?? 0) : v)
+                        }}
+                        className={inputClass}
+                      />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {OVERRIDE_FIELDS.map(f => {
+                if (f.key === 'direction' && selected.type === 'drill') return null
+                const eop = effectiveOp(selected, globalToolSettings)
+                const hasOverride = (selected.overrides ?? {})[f.key] !== undefined
+                return (
+                  <div key={f.key} className="flex justify-between text-xs">
+                    <span className="text-[#555]">{f.label.replace(/ \(.*\)/, '')}</span>
+                    <span className={hasOverride ? 'text-[#6b9fff]' : 'text-[#888]'}>
+                      {f.type === 'select' ? f.options.find(o => o.id === eop[f.key])?.label : eop[f.key]}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       ) : (
         <div className="flex-1 flex items-center justify-center">
@@ -189,26 +306,6 @@ function Field({ label, children }) {
       {children}
     </div>
   )
-}
-
-function NumInput({ value, min, step, onChange }) {
-  return (
-    <input
-      type="number"
-      value={value}
-      min={min}
-      step={step}
-      onChange={(e) => {
-        const parsed = parseFloat(e.target.value)
-        onChange(isNaN(parsed) ? (min ?? 0) : parsed)
-      }}
-      className={inputClass}
-    />
-  )
-}
-
-function Divider() {
-  return <div className="border-t border-[#1e1e1e]" />
 }
 
 const inputClass =

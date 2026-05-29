@@ -20,13 +20,13 @@ export const grbl = {
     ].join('\n')
   },
 
-  footer() {
+  footer(safeZ = 5) {
     return [
       '',
-      'M5',    // spindle off
-      'G0 Z5', // retract
+      'M5',
+      `G0 Z${fmt(safeZ)}`,
       'G0 X0 Y0',
-      'M30',   // end of program
+      'M30',
     ].join('\n')
   },
 

@@ -3,12 +3,15 @@ import { useAppState } from '../context/AppStateContext'
 import { generateGcode, computeToolpathData } from '../lib/gcodeGenerator'
 
 export default function GcodePanel() {
-  const { gcode, setGcode, operations, stlData, postProcessor, setToolpathData } = useAppState()
+  const {
+    gcode, setGcode, operations, stlData, postProcessor, setToolpathData,
+    globalToolSettings, machineSettings,
+  } = useAppState()
 
   function handleGenerate() {
     if (!stlData) return
-    setGcode(generateGcode(stlData, operations, postProcessor))
-    setToolpathData(computeToolpathData(stlData, operations))
+    setGcode(generateGcode(stlData, operations, postProcessor, globalToolSettings, machineSettings))
+    setToolpathData(computeToolpathData(stlData, operations, globalToolSettings))
   }
 
   function handleDownload() {

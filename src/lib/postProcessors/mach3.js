@@ -19,11 +19,11 @@ export const mach3 = {
     ].join('\n')
   },
 
-  footer() {
+  footer(safeZ = 5) {
     return [
       '',
       'M5',
-      'G0 Z5',
+      `G0 Z${fmt(safeZ)}`,
       'G0 X0 Y0',
       'M30',
       '%',
