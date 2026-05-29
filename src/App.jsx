@@ -21,8 +21,6 @@ const DEFAULT_MACHINE = {
   originSafetyHeight: 10,
   workAreaX: 300,
   workAreaY: 300,
-  xOffset: 0,
-  yOffset: 0,
   zZeroMode: 'top',
   materialThickness: 10,
 }

@@ -36,14 +36,6 @@ export default function SetupPanel() {
 
       {/* Coordinate Origin */}
       <Section label="Coordinate Origin">
-        <Field label="X Offset (mm)">
-          <NumInput value={machineSettings.xOffset} min={-9999} step={1}
-            onChange={v => updateMachine('xOffset', v)} />
-        </Field>
-        <Field label="Y Offset (mm)">
-          <NumInput value={machineSettings.yOffset} min={-9999} step={1}
-            onChange={v => updateMachine('yOffset', v)} />
-        </Field>
         <Field label="Z Zero">
           <select
             value={machineSettings.zZeroMode}

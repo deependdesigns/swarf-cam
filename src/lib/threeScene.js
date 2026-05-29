@@ -107,9 +107,7 @@ export function renderToolpaths(state, toolpathData) {
     opGroup.userData.mat = mat
 
     for (const polyline of op.paths) {
-      const ox = state.stlMin?.x ?? 0
-      const oy = state.stlMin?.y ?? 0
-      const pts = polyline.map(([x, y, z]) => new THREE.Vector3(x - ox, topY + z, -(y - oy)))
+      const pts = polyline.map(([x, y, z]) => new THREE.Vector3(x, topY + z, -y))
       const geo = new THREE.BufferGeometry().setFromPoints(pts)
       opGroup.add(new THREE.Line(geo, mat))
     }
@@ -148,11 +146,6 @@ export function loadStlIntoScene(state, stlArrayBuffer) {
   const loader = new STLLoader()
   const geometry = loader.parse(stlArrayBuffer)
   geometry.computeVertexNormals()
-  geometry.computeBoundingBox()
-  const stlMin = geometry.boundingBox.min.clone()
-  state.stlMin = stlMin
-  // Translate so bottom-left-bottom corner sits at origin (standard CNC: X0 Y0 Z0 at workpiece corner)
-  geometry.translate(-stlMin.x, -stlMin.y, -stlMin.z)
 
   const material = new THREE.MeshStandardMaterial({
     color: 0x8899aa,
