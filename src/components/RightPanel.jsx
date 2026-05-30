@@ -7,13 +7,16 @@ const TABS = [
   { id: 'operations', label: 'Operations' },
 ]
 
-export default function RightPanel() {
+export default function RightPanel({ onCollapse }) {
   const [activeTab, setActiveTab] = useState('operations')
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Tab bar */}
       <div className="flex shrink-0 border-b border-[#2a2a2a] bg-[#111]">
+        {onCollapse && (
+          <button onClick={onCollapse} className="px-2 text-[#444] hover:text-[#888] transition-colors shrink-0" title="Collapse panel">▶</button>
+        )}
         {TABS.map(tab => (
           <button
             key={tab.id}

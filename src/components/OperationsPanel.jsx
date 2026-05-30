@@ -2,13 +2,6 @@ import { useState } from 'react'
 import { useAppState } from '../context/AppStateContext'
 import { effectiveOp } from '../lib/gcodeGenerator'
 
-const OP_TYPES = [
-  { id: 'profile', label: 'Profile' },
-  { id: 'pocket', label: 'Pocket' },
-  { id: 'drill', label: 'Drill' },
-  { id: 'slot', label: 'Slot (open)' },
-]
-
 const DIRECTIONS = [
   { id: 'climb', label: 'Climb' },
   { id: 'conventional', label: 'Conventional' },
@@ -159,35 +152,24 @@ export default function OperationsPanel() {
             />
           </Field>
 
-          <Field label="Type">
-            <select
-              value={selected.type}
-              onChange={e => updateField('type', e.target.value)}
-              className={inputClass}
-            >
-              {OP_TYPES.map(t => (
-                <option key={t.id} value={t.id}>{t.label}</option>
-              ))}
-            </select>
-          </Field>
-
-          <Field label="Depth (mm)">
-            <input
-              type="number"
-              value={selected.depth}
-              min={0.01}
-              step={0.5}
-              onChange={e => {
-                const v = parseFloat(e.target.value)
-                updateField('depth', isNaN(v) ? 0.01 : v)
-              }}
-              className={inputClass}
-            />
-          </Field>
-
-          <div className="text-[#555] text-xs">
-            Z passes: {Math.ceil(selected.depth / Math.max(effectiveOp(selected, globalToolSettings).stepdown, 0.001))}
+          <div className="text-[#555] text-xs flex justify-between">
+            <span>Type</span>
+            <span className="text-[#888] capitalize">{selected.type}</span>
           </div>
+
+          {selected.detectedDepth != null && (
+            <div className="text-[#555] text-xs flex justify-between">
+              <span>Z passes</span>
+              <span className="text-[#888]">
+                {Math.ceil(selected.detectedDepth / Math.max(effectiveOp(selected, globalToolSettings).stepdown, 0.001))}
+                {(() => {
+                  const sd = Math.max(effectiveOp(selected, globalToolSettings).stepdown, 0.001)
+                  const rem = selected.detectedDepth % sd
+                  return rem > 0.001 ? ` (last: ${rem.toFixed(2)}mm)` : ''
+                })()}
+              </span>
+            </div>
+          )}
 
           <div className="border-t border-[#1e1e1e]" />
 

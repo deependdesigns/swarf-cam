@@ -13,6 +13,7 @@ const OP_COLORS = [0x00e5ff, 0xffab40, 0x69f0ae, 0xff4081, 0xea80fc, 0xffd740, 0
 export function effectiveOp(op, globalTool) {
   return {
     ...op,
+    depth: op.detectedDepth ?? 0,
     toolDiameter: op.overrides?.toolDiameter ?? globalTool.toolDiameter,
     feedrate:     op.overrides?.feedrate     ?? globalTool.feedrate,
     spindleSpeed: op.overrides?.spindleSpeed ?? globalTool.spindleSpeed,
@@ -183,7 +184,6 @@ export function detectFeatures(stlArrayBuffer) {
           detectedDepth: topZ,
           detectedCount: 1,
           color: OP_COLORS[colorIdx++ % OP_COLORS.length],
-          depth: Math.ceil(topZ),
           enabled: true,
           overrides: {},
         })
@@ -204,7 +204,6 @@ export function detectFeatures(stlArrayBuffer) {
         detectedDepth: slot.depth,
         detectedCount: 1,
         color: OP_COLORS[colorIdx++ % OP_COLORS.length],
-        depth: Math.ceil(slot.depth * 10) / 10,
         enabled: true,
         overrides: {},
       })
@@ -271,7 +270,6 @@ export function detectFeatures(stlArrayBuffer) {
       detectedDepth: g.depth,
       detectedCount: count,
       color: OP_COLORS[g.colorIdx % OP_COLORS.length],
-      depth: Math.ceil(g.depth * 10) / 10,
       enabled: true,
       overrides: {},
     })

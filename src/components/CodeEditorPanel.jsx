@@ -3,7 +3,7 @@ import Editor from '@monaco-editor/react'
 import { useAppState } from '../context/AppStateContext'
 import { compileOpenSCAD } from '../lib/openscadCompiler'
 
-export default function CodeEditorPanel() {
+export default function CodeEditorPanel({ onCollapse }) {
   const { scadCode, setScadCode, setStlData, compiling, setCompiling, setCompileError, compileError } = useAppState()
   const editorRef = useRef(null)
 
@@ -34,6 +34,9 @@ export default function CodeEditorPanel() {
         >
           {compiling ? 'Compiling…' : '▶ Compile'}
         </button>
+        {onCollapse && (
+          <button onClick={onCollapse} className="text-[#444] hover:text-[#888] px-1 transition-colors" title="Collapse panel">◀</button>
+        )}
       </PanelHeader>
 
       <div className="flex-1 min-h-0">

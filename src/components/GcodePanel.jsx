@@ -26,7 +26,7 @@ export default function GcodePanel() {
   }
 
   return (
-    <div className="flex flex-col h-[280px] min-h-[200px]">
+    <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-3 py-2 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
         <span className="text-[#888] text-xs uppercase tracking-wider">G-code Output</span>
         <div className="flex gap-2">
