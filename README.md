@@ -2,20 +2,6 @@
 
 Browser-based CNC CAM tool. Write OpenSCAD, compile to STL, and generate G-code — entirely in the browser with no server required.
 
-![Swarf.cam UI](src/assets/hero.png)
-
-## Features
-
-- **OpenSCAD editor** — Monaco-powered editor with syntax highlighting; write parametric models and compile to STL in-browser via WebAssembly
-- **3D preview** — Three.js renderer with orbit controls and a toolpath visualization overlay
-- **Auto-detect operations** — analyses the compiled STL geometry and automatically creates machining operations:
-  - Profile cuts (outer contour)
-  - Pockets (circular and irregular)
-  - Drill holes (including thread holes hidden inside counterbores)
-  - Open slots
-- **Operations panel** — configure each operation: tool diameter, feedrate, spindle speed, depth, stepdown, climb/conventional direction
-- **G-code output** — generates ready-to-run G-code with selectable post processors: GRBL, Mach3, LinuxCNC
-
 ## Stack
 
 | Layer | Library |
@@ -26,6 +12,8 @@ Browser-based CNC CAM tool. Write OpenSCAD, compile to STL, and generate G-code 
 | 3D | Three.js |
 | CAD compiler | openscad-wasm |
 | Polygon offsets | Clipper.js |
+
+---
 
 ## Getting started
 
@@ -44,20 +32,154 @@ npm run build
 
 The `dist/` folder is a static site — deploy to any static host.
 
-## Deployment notes
+### Deployment notes
 
-OpenSCAD runs in a SharedArrayBuffer context, which requires `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers. The `public/_headers` file sets these automatically for Cloudflare Pages and Netlify deployments.
+OpenSCAD runs in a SharedArrayBuffer context, which requires these headers on every response:
 
-If you deploy elsewhere, configure your host to serve those two headers on every response, or the WASM compiler will not load.
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+`public/_headers` sets them automatically for Cloudflare Pages and Netlify. For other hosts, configure your server to send both headers or the WASM compiler will not load.
+
+---
+
+## Interface overview
+
+The app is divided into three columns:
+
+```
+┌─────────────────┬──────────────────────┬────────────────┐
+│  Editor panel   │    3D preview        │  Right panel   │
+│  (collapsible)  │    (center)          │  (collapsible) │
+│                 │                      │                │
+│  ┌───────────┐  │                      │  Setup tab     │
+│  │ G-code    │  │                      │  Operations    │
+│  │ panel     │  │                      │  tab           │
+│  └───────────┘  │                      │                │
+└─────────────────┴──────────────────────┴────────────────┘
+```
+
+Both side panels can be collapsed using the **▶ / ◀** buttons on their edges. The G-code pane can be resized by dragging the divider between the editor and G-code areas.
+
+---
 
 ## Workflow
 
-1. Write or paste OpenSCAD code in the left editor panel
-2. Click **Compile** — the model renders in the 3D preview
-3. Detected machining operations appear automatically in the right panel
-4. Adjust tool parameters (diameter, feedrate, depth, etc.) per operation
-5. Select a post processor (GRBL / Mach3 / LinuxCNC) in the header
-6. Click **Generate G-code** — output appears in the bottom-left panel, ready to copy
+### 1 — Write your model
+
+The left panel contains a Monaco editor pre-loaded with a sample OpenSCAD jig. Write or paste your own OpenSCAD code. The editor provides syntax highlighting and accepts all standard OpenSCAD constructs.
+
+Click **Compile** to build the STL. A `compiling…` indicator appears in the header while the WASM compiler runs. Once complete, the model appears in the 3D preview and operations are auto-detected.
+
+### 2 — Review detected operations
+
+Swarf.cam analyses the compiled STL geometry and automatically creates machining operations in the **Operations** tab (right panel):
+
+| Operation type | Description |
+|---|---|
+| **Profile cut** | Outer contour of the model, offset inward by tool radius |
+| **Pocket** | Circular, hexagonal, or irregular interior cavities; inside-out concentric passes |
+| **Drill** | Holes narrower than the tool diameter — single plunge |
+| **Slot** | Through-cuts open on one or both ends (X-direction, Y-direction, or cross/intersecting); concentric rectangular passes |
+
+**Stepped and counterbored features** are handled correctly — each bore level is detected independently using the z-depth at which it first appears, so the inner bore starts cutting from the parent pocket floor rather than from the top of the workpiece.
+
+**Concentric features** (e.g. a hex bolt-head recess with a thread hole through its center) are split into separate operations, each using its own contour at the depth where it was actually visible in the STL.
+
+Each operation card shows:
+- Colour swatch (matches the 3D toolpath overlay)
+- Label and type
+- Detected depth and number of instances
+- Z-pass count and last-pass remainder
+- Enable / disable checkbox
+
+Click any operation to select it and see its toolpath highlighted in the 3D view.
+
+### 3 — Configure tool and machine settings
+
+The **Setup** tab (right panel) contains two sections:
+
+**Machine**
+| Setting | Default | Notes |
+|---|---|---|
+| Safety Height | 5 mm | Rapid height above work |
+| Origin Safety Height | 10 mm | Height for start/end moves |
+| Work Area X / Y | 300 mm | Grid reference in 3D view |
+| Z Zero | Top of material | Switch to Spoilboard to enter material thickness |
+
+**Global Tool** — applies to all operations unless overridden per-operation:
+| Setting | Default |
+|---|---|
+| Tool Diameter | 3.175 mm (1/8") |
+| Feedrate | 1000 mm/min |
+| Spindle Speed | 18 000 RPM |
+| Stepdown | 1.0 mm |
+| Stepover | 85% |
+| Direction | Climb |
+
+> Settings are saved to `localStorage` and persist between sessions.
+
+**Per-operation overrides** — select an operation in the Operations tab then click **Override** to set tool parameters for that operation only. Click the field label to clear an override and fall back to the global value.
+
+### 4 — Select a post processor
+
+Use the **Post** dropdown in the header to select the output dialect:
+
+- **GRBL** — standard for most hobby controllers
+- **Mach3** — legacy Windows-based controllers
+- **LinuxCNC** — open-source CNC controller
+
+### 5 — Generate G-code
+
+Click **Generate G-code** in the G-code panel (bottom-left). The output appears in the Monaco editor below. Click **Download** to save the `.nc` file.
+
+The generated code includes:
+- Header with spindle start and coordinate mode
+- A separate section for each enabled operation, labelled with comments
+- Inside-out concentric passes for pockets and slots — no retract between rings at the same depth
+- Plunge moves at 30% of the cutting feedrate
+- A retract to origin safety height at the start and end of each operation
+
+---
+
+## 3D preview controls
+
+| Input | Action |
+|---|---|
+| Left-drag | Orbit |
+| Right-drag / two-finger drag | Pan |
+| Scroll | Zoom |
+| **◎** button | Toggle model transparency |
+| **↗** button | Toggle toolpath overlay |
+| **⤴** button | Toggle rapid-move overlay |
+
+### Timeline simulation
+
+The toolbar below the 3D view lets you simulate the tool motion at real-world feedrates:
+
+- **▶ / ⏸** — play / pause
+- **Speed buttons** — 0.5× · 1× · 2× · 5× · 10×
+- **Scrubber** — drag to any point in the program
+- **Current move indicator** — shows move type (Feed / Rapid / Plunge) and feedrate at the current position
+
+The tool head in the 3D view moves at the correct speed relative to the configured feedrate. Rapid moves are simulated at 5 000 mm/min; actual machine rapid speed may differ.
+
+---
+
+## Feature detection details
+
+Swarf.cam slices the STL at multiple Z levels to find features:
+
+- **Top surface slice** — finds features open at the top (pockets, drill holes, slots)
+- **Floor-level slices** — for each upward-facing horizontal face found in the mesh, a slice just below that level finds features only accessible from below (inner bores of counterbores, thread holes inside hex-head recesses)
+
+Each detected feature is assigned a `detectionSliceZ` — the Z level where it was first seen. Toolpath generation uses that same slice to find the correct boundary contour, even for features whose STL walls only exist below a parent cavity.
+
+Features are deduplicated across scan levels by position and radius so the same hole is never counted twice.
+
+---
 
 ## License
 
