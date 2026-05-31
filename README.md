@@ -106,8 +106,9 @@ The **Setup** tab (right panel) contains two sections:
 |---|---|---|
 | Safety Height | 5 mm | Rapid height above work |
 | Origin Safety Height | 10 mm | Height for start/end moves |
-| Work Area X / Y | 300 mm | Grid reference in 3D view |
-| Z Zero | Top of material | Switch to Spoilboard to enter material thickness |
+| Work Area X / Y | 300 mm | Grid reference in 3D view; also the XY dimensions of the stock in Stock Simulation mode |
+| Z Zero | Top of material | Affects how cut depths are calculated in G-code and stock simulation |
+| Material Thickness | 10 mm | Height of the stock block in Stock Simulation mode; also used as the Z base offset in Spoilboard mode |
 
 **Global Tool** — applies to all operations unless overridden per-operation:
 | Setting | Default |
@@ -151,11 +152,38 @@ The generated code includes:
 | Left-drag | Orbit |
 | Right-drag / two-finger drag | Pan |
 | Scroll | Zoom |
-| **◎** button | Toggle model transparency |
-| **↗** button | Toggle toolpath overlay |
-| **⤴** button | Toggle rapid-move overlay |
+
+The preview panel has two modes, toggled by the **Stock Sim** button in the panel header.
+
+### Mode 1 — OpenSCAD Render (default)
+
+Shows the compiled STL model with optional overlays:
+
+| Button | Effect |
+|---|---|
+| **Paths** | Toggle toolpath lines (colour-coded per operation) |
+| **Rapids** | Toggle rapid-move lines |
+| **Ghost** | Make the model transparent so toolpaths show through |
+
+### Mode 2 — Stock Simulation
+
+Switches to a heightmap-based material-removal simulation. Click **Stock Sim** (amber when active) to enter this mode.
+
+The simulation reads the **Work Area X/Y** and **Material Thickness** from the Setup tab to define the starting stock block, then parses the generated G-code and removes material everywhere the tool travels at cutting depth.
+
+**What you see:**
+
+- A solid tan/wood-coloured block representing the raw stock
+- Machined regions shown in grey, with depth visible through lighting and shading
+- The full 3D form of the part as it would appear after all enabled operations run
+
+**How it updates:** the simulation re-runs automatically whenever you change the G-code (by clicking Generate), the Work Area dimensions, Material Thickness, or Z Zero mode.
+
+> **Tip:** Set Material Thickness to match your actual stock before generating G-code. When Z Zero is set to "Top of material" the field is now always visible in the Setup tab.
 
 ### Timeline simulation
+
+*(Available in OpenSCAD Render mode only — hidden in Stock Simulation mode)*
 
 The toolbar below the 3D view lets you simulate the tool motion at real-world feedrates:
 
@@ -178,6 +206,30 @@ Swarf.cam slices the STL at multiple Z levels to find features:
 Each detected feature is assigned a `detectionSliceZ` — the Z level where it was first seen. Toolpath generation uses that same slice to find the correct boundary contour, even for features whose STL walls only exist below a parent cavity.
 
 Features are deduplicated across scan levels by position and radius so the same hole is never counted twice.
+
+---
+
+## Known limitations
+
+### Stock simulation
+
+| Limitation | Detail |
+|---|---|
+| **Grid resolution** | The heightmap is 256 × 256 cells over the full work area. At the default 300 × 300 mm work area that is ~1.2 mm/cell — fine features narrower than ~1–2 mm may have slightly soft edges. |
+| **Static side walls** | The four side walls and bottom face are rendered at full material thickness regardless of cuts. Profile cuts that exit through the edge of the stock will not carve the side walls. |
+| **Stock covers full work area** | The simulated stock is always Work Area X × Work Area Y, not the workpiece footprint. For a small part on a large machine most of the block will appear untouched. |
+| **No arc moves (G2/G3)** | The G-code parser only handles `G0`/`G1` linear moves. Arc moves from post-processors that emit G2/G3 are silently ignored — those tool paths will not appear as material removal. |
+| **Plunge-while-traversing Z** | For moves that change X, Y, and Z simultaneously, the simulation uses the deepest Z reached anywhere along the segment. This can slightly overstate material removal on the approach to a cut. In practice, the generated G-code separates plunges from feed moves so this rarely applies. |
+| **Tool diameter source** | The simulator reads `; Tool diameter: X mm` from each operation's G-code header comment. If you edit the G-code manually or use a post-processor that omits this comment, the simulation falls back to the global tool diameter and may be inaccurate for operations with per-op overrides. |
+| **Stale simulation after settings changes** | If you change Work Area or Material Thickness *without* regenerating G-code, the stock block dimensions update but the simulation still reflects the old G-code. Regenerate G-code to get a fully consistent result. |
+
+### Feature detection
+
+| Limitation | Detail |
+|---|---|
+| **Freeform pockets** | Only axis-aligned rectangular and roughly circular pockets are classified correctly. Irregular freeform cavities may be grouped with a nearby pocket or missed entirely. |
+| **Very shallow features** | Features shallower than ~0.1 mm may not be detected, as the STL slicer operates with 0.05 mm tolerance. |
+| **Overlapping operations** | If two detected operations have overlapping toolpaths (e.g. a pocket exactly tangent to a profile), the generated G-code may leave witness marks. No collision detection is performed. |
 
 ---
 
