@@ -1,17 +1,21 @@
 import Editor from '@monaco-editor/react'
 import { useAppState } from '../context/AppStateContext'
-import { generateGcode, computeToolpathData } from '../lib/gcodeGenerator'
+import { generateGcode, computeToolpathData, computeRapidPaths, computeMoveSequence } from '../lib/gcodeGenerator'
 
 export default function GcodePanel() {
   const {
     gcode, setGcode, operations, stlData, postProcessor, setToolpathData,
-    globalToolSettings, machineSettings,
+    globalToolSettings, machineSettings, setRapidPaths, setMoveSequence,
   } = useAppState()
 
   function handleGenerate() {
     if (!stlData) return
     setGcode(generateGcode(stlData, operations, postProcessor, globalToolSettings, machineSettings))
-    setToolpathData(computeToolpathData(stlData, operations, globalToolSettings))
+    const toolpaths = computeToolpathData(stlData, operations, globalToolSettings)
+    setToolpathData(toolpaths)
+    const safeZ = machineSettings.safetyHeight ?? 5
+    setRapidPaths(computeRapidPaths(toolpaths, safeZ))
+    setMoveSequence(computeMoveSequence(toolpaths, safeZ))
   }
 
   function handleDownload() {

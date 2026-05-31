@@ -32,6 +32,13 @@ export function initThreeScene(container) {
   dirLight.shadow.mapSize.set(2048, 2048)
   dirLight.shadow.camera.near = 0.1
   dirLight.shadow.camera.far = 1000
+  // Frustum must cover the full work area (300×300mm default) or the boundary
+  // falls mid-mesh and creates a hard diagonal artifact on the top face.
+  dirLight.shadow.camera.left = -250
+  dirLight.shadow.camera.right = 250
+  dirLight.shadow.camera.top = 250
+  dirLight.shadow.camera.bottom = -250
+  dirLight.shadow.bias = -0.001
   scene.add(dirLight)
 
   const fillLight = new THREE.DirectionalLight(0x4466cc, 0.3)
@@ -171,6 +178,7 @@ export function loadStlIntoScene(state, stlArrayBuffer) {
   state.camera.position.set(center.x + dist * 0.7, center.y + dist * 0.5, center.z + dist * 0.7)
   state.controls.target.copy(center)
   state.controls.update()
+  state.meshTopY = box.max.y
 
   // Fit shadow frustum to model so the shadow map covers the whole mesh
   const shadowPad = maxDim * 0.6
@@ -205,12 +213,99 @@ export function updateWorkArea(state, workAreaX, workAreaY) {
   state.scene.add(state.workAreaLine)
 }
 
+export function clearRapidMoves(state) {
+  if (!state.rapidGroup) return
+  state.rapidGroup.traverse(obj => { obj.geometry?.dispose(); obj.material?.dispose() })
+  state.scene.remove(state.rapidGroup)
+  state.rapidGroup = null
+}
+
+export function renderRapidMoves(state, rapidPaths) {
+  clearRapidMoves(state)
+  if (!rapidPaths?.length) return
+
+  const topY = state.meshTopY ?? 0
+  const group = new THREE.Group()
+  const mat = new THREE.LineBasicMaterial({ color: 0x996600, transparent: true, opacity: 0.55 })
+
+  for (const path of rapidPaths) {
+    const pts = path.map(([x, y, z]) => new THREE.Vector3(x, topY + z, -y))
+    const geo = new THREE.BufferGeometry().setFromPoints(pts)
+    group.add(new THREE.Line(geo, mat))
+  }
+
+  state.scene.add(group)
+  state.rapidGroup = group
+}
+
+export function setMeshOpacity(state, transparent) {
+  if (!state.mesh) return
+  state.mesh.material.transparent = transparent
+  state.mesh.material.opacity = transparent ? 0.22 : 1.0
+  state.mesh.material.depthWrite = !transparent
+  // FrontSide only when transparent: eliminates back-face/front-face render-order conflicts
+  // that cause the diagonal seam on flat surfaces with DoubleSide + alpha blending.
+  state.mesh.material.side = transparent ? THREE.FrontSide : THREE.DoubleSide
+  state.mesh.material.needsUpdate = true
+}
+
+export function clearToolHead(state) {
+  if (!state.toolHead) return
+  state.toolHead.traverse(obj => { obj.geometry?.dispose(); obj.material?.dispose() })
+  state.scene.remove(state.toolHead)
+  state.toolHead = null
+}
+
+export function updateToolHead(state, toolDiameter = 3.175) {
+  clearToolHead(state)
+
+  const r = toolDiameter / 2
+  const shankHeight = 22
+  const tipHeight = 3
+
+  const shankGeo = new THREE.CylinderGeometry(r, r, shankHeight, 14)
+  const shankMat = new THREE.MeshStandardMaterial({ color: 0xccbbaa, metalness: 0.75, roughness: 0.25 })
+  const shank = new THREE.Mesh(shankGeo, shankMat)
+  shank.position.y = shankHeight / 2
+
+  const tipGeo = new THREE.CylinderGeometry(r * 0.5, r, tipHeight, 14)
+  const tipMat = new THREE.MeshStandardMaterial({ color: 0x999988, metalness: 0.9, roughness: 0.15 })
+  const tip = new THREE.Mesh(tipGeo, tipMat)
+  tip.position.y = -tipHeight / 2
+
+  const group = new THREE.Group()
+  group.add(shank)
+  group.add(tip)
+  group.visible = false
+
+  state.scene.add(group)
+  state.toolHead = group
+  state.toolHeadTipOffset = tipHeight
+}
+
+export function positionToolHead(state, [tx, ty, tz]) {
+  if (!state.toolHead) return
+  const topY = state.meshTopY ?? 0
+  // The group origin is at the shank-tip junction; the cutting tip is tipOffset below it.
+  // Adding tipOffset raises the group so the tip bottom lands exactly at topY + tz.
+  const tipOffset = state.toolHeadTipOffset ?? 0
+  state.toolHead.position.set(tx, topY + tz + tipOffset, -ty)
+  state.toolHead.visible = true
+}
+
 export function disposeScene(state) {
   cancelAnimationFrame(state.animId)
   state.ro?.disconnect()
+  clearToolpaths(state)
+  clearRapidMoves(state)
+  clearToolHead(state)
   if (state.mesh) {
     state.mesh.geometry.dispose()
     state.mesh.material.dispose()
+  }
+  if (state.workAreaLine) {
+    state.workAreaLine.geometry.dispose()
+    state.workAreaLine.material.dispose()
   }
   state.renderer.dispose()
   state.container.removeChild(state.renderer.domElement)

@@ -144,6 +144,10 @@ export default function App() {
   const [postProcessor, setPostProcessor] = useState('grbl')
   const [toolpathData, setToolpathData] = useState(null)
   const [showToolpaths, setShowToolpaths] = useState(true)
+  const [showRapids, setShowRapids] = useState(true)
+  const [modelTransparent, setModelTransparent] = useState(false)
+  const [rapidPaths, setRapidPaths] = useState(null)
+  const [moveSequence, setMoveSequence] = useState(null)
   const [selectedOperationId, setSelectedOperationId] = useState(null)
   const [machineSettings, setMachineSettings] = useState(() => loadStorage('swarf-machine', DEFAULT_MACHINE))
   const [globalToolSettings, setGlobalToolSettings] = useState(() => loadStorage('swarf-tool', DEFAULT_TOOL))
@@ -182,11 +186,11 @@ export default function App() {
   const handleStlReady = useCallback((data) => {
     setStlData(data)
     if (data) {
-      const detected = detectFeatures(data)
+      const detected = detectFeatures(data, globalToolSettings.toolDiameter)
       setOperations(detected)
       setSelectedOperationId(detected[0]?.id ?? null)
     }
-  }, [])
+  }, [globalToolSettings.toolDiameter])
 
   return (
     <AppStateContext.Provider value={{
@@ -199,6 +203,10 @@ export default function App() {
       postProcessor, setPostProcessor,
       toolpathData, setToolpathData,
       showToolpaths, setShowToolpaths,
+      showRapids, setShowRapids,
+      modelTransparent, setModelTransparent,
+      rapidPaths, setRapidPaths,
+      moveSequence, setMoveSequence,
       selectedOperationId, setSelectedOperationId,
       machineSettings, setMachineSettings,
       globalToolSettings, setGlobalToolSettings,
