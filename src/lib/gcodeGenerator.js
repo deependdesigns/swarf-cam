@@ -26,25 +26,26 @@ export function effectiveOp(op, globalTool) {
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
 function classifyContours(contours) {
-  const areas = contours.map(polygonArea)
-  const byArea = contours.map((_, i) => i).sort((a, b) => areas[b] - areas[a])
-  const isOuter = new Array(contours.length).fill(true)
-  for (let i = 1; i < byArea.length; i++) {
-    const ci = byArea[i]
-    const [px, py] = contours[ci][0]
-    for (let j = 0; j < i; j++) {
-      const cj = byArea[j]
+  // Count how many other contours contain each contour's first point.
+  // Even depth = solid boundary (outer), odd depth = void boundary (inner/hole to machine).
+  // This correctly handles islands/bosses inside pockets (depth 2 = outer, not a hole).
+  const n = contours.length
+  const nestingDepth = new Array(n).fill(0)
+  for (let i = 0; i < n; i++) {
+    const [px, py] = contours[i][0]
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue
       let inside = false
-      const poly = contours[cj]
+      const poly = contours[j]
       for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) {
         const [xi, yi] = poly[a], [xj, yj] = poly[b]
         if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
           inside = !inside
       }
-      if (inside) { isOuter[ci] = false; break }
+      if (inside) nestingDepth[i]++
     }
   }
-  return isOuter
+  return nestingDepth.map(d => d % 2 === 0)
 }
 
 function circleFromContour(polygon) {
@@ -62,6 +63,133 @@ function getBbox(polygon) {
     if (y < yMin) yMin = y; if (y > yMax) yMax = y
   }
   return { xMin, xMax, yMin, yMax }
+}
+
+// 3×3 Gaussian elimination for circle fitting
+function solve3x3(M, b) {
+  const a = M.map((row, i) => [...row, b[i]])
+  for (let col = 0; col < 3; col++) {
+    let maxRow = col
+    for (let row = col + 1; row < 3; row++)
+      if (Math.abs(a[row][col]) > Math.abs(a[maxRow][col])) maxRow = row
+    ;[a[col], a[maxRow]] = [a[maxRow], a[col]]
+    if (Math.abs(a[col][col]) < 1e-10) return null
+    for (let row = col + 1; row < 3; row++) {
+      const f = a[row][col] / a[col][col]
+      for (let k = col; k <= 3; k++) a[row][k] -= f * a[col][k]
+    }
+  }
+  const x = new Array(3)
+  for (let i = 2; i >= 0; i--) {
+    x[i] = a[i][3]
+    for (let j = i + 1; j < 3; j++) x[i] -= a[i][j] * x[j]
+    x[i] /= a[i][i]
+  }
+  return x
+}
+
+// Algebraic least-squares circle fit. Returns { cx, cy, r } or null.
+// Solves: Ax + By + D = x²+y² where A=2cx, B=2cy, D=r²-cx²-cy²
+function fitCircle(points) {
+  if (points.length < 3) return null
+  let sX=0, sY=0, sX2=0, sY2=0, sXY=0, sXR=0, sYR=0, sR=0
+  for (const [x, y] of points) {
+    const r2 = x*x + y*y
+    sX += x; sY += y; sX2 += x*x; sY2 += y*y; sXY += x*y
+    sXR += x*r2; sYR += y*r2; sR += r2
+  }
+  const n = points.length
+  const sol = solve3x3(
+    [[sX2, sXY, sX], [sXY, sY2, sY], [sX, sY, n]],
+    [sXR, sYR, sR]
+  )
+  if (!sol) return null
+  const [A, B, D] = sol
+  const cx = A / 2, cy = B / 2
+  const r2val = cx*cx + cy*cy + D
+  if (r2val <= 0) return null
+  return { cx, cy, r: Math.sqrt(r2val) }
+}
+
+// Generate a closed circular polygon for use as a virtual pocket contour
+function makeCircleContour(cx, cy, r, segments = 32) {
+  return Array.from({ length: segments }, (_, i) => {
+    const angle = (2 * Math.PI * i) / segments
+    return [cx + r * Math.cos(angle), cy + r * Math.sin(angle)]
+  })
+}
+
+// Detect cylindrical pockets open at a workpiece face (edge pockets).
+// These appear as concave circular arcs in the outer contour. Each face is
+// checked independently; a valid arc must fit a circle whose center is near
+// the face edge and whose floor is confirmed by a real upward-facing surface.
+function detectEdgePocketsFromContour(contour, stlArrayBuffer, topZ, sliceZ, toolDiameter) {
+  if (contour.length < 10) return []
+  const bbox = getBbox(contour)
+  const n = contour.length
+  const FACE_TOL = 1.0    // mm: point is "on face" within this tolerance
+  const MIN_DIP  = toolDiameter  // arc must dip at least 1 tool diameter inward
+
+  const faces = [
+    { axis: 0, edgeVal: bbox.xMax, invert: false },
+    { axis: 0, edgeVal: bbox.xMin, invert: true  },
+    { axis: 1, edgeVal: bbox.yMax, invert: false },
+    { axis: 1, edgeVal: bbox.yMin, invert: true  },
+  ]
+
+  const results = []
+
+  for (const face of faces) {
+    const mainOf  = ([x, y]) => face.axis === 0 ? x : y
+    const inward  = (pt) => {
+      const v = mainOf(pt)
+      return face.invert ? v - face.edgeVal : face.edgeVal - v
+    }
+    const onFace = contour.map(pt => Math.abs(mainOf(pt) - face.edgeVal) < FACE_TOL)
+
+    // Collect each off-face run (starts when we leave the face, ends on return)
+    for (let i = 0; i < n; i++) {
+      const prev = (i - 1 + n) % n
+      if (onFace[i] || !onFace[prev]) continue  // looking for face→off transition
+
+      const arcPts = []
+      for (let step = 0; step < n; step++) {
+        const idx = (i + step) % n
+        if (onFace[idx]) break
+        arcPts.push(contour[idx])
+      }
+
+      if (arcPts.length < 5) continue
+
+      // Must dip inward meaningfully (eliminates opposite-face runs with near-zero inward dist)
+      const maxDip = Math.max(...arcPts.map(inward))
+      if (maxDip < MIN_DIP) continue
+
+      // Fit circle
+      const circle = fitCircle(arcPts)
+      if (!circle || circle.r < toolDiameter * 0.9) continue
+
+      // Circle center must be near this face
+      const distFromFace = Math.abs(mainOf([circle.cx, circle.cy]) - face.edgeVal)
+      if (distFromFace > circle.r * 0.4) continue
+
+      // Fit quality: average distance residual must be small
+      const avgResid = arcPts.reduce((s, pt) =>
+        s + Math.abs(Math.hypot(pt[0] - circle.cx, pt[1] - circle.cy) - circle.r), 0) / arcPts.length
+      if (avgResid > circle.r * 0.2) continue
+
+      // Confirm a real floor exists within the cylinder's inner region
+      const dr = circle.r * 0.4
+      const depth = getRegionFloorDepth(stlArrayBuffer, topZ,
+        circle.cx - dr, circle.cx + dr,
+        circle.cy - dr, circle.cy + dr)
+      if (depth >= topZ - 0.5) continue
+
+      results.push({ cx: circle.cx, cy: circle.cy, r: circle.r, depth })
+    }
+  }
+
+  return results
 }
 
 // targetRadius: when set, concentric contours (same centroid) are disambiguated by
@@ -175,9 +303,8 @@ function detectOpenSlots(outerContours, stlArrayBuffer, topZ) {
               const openYMin = Math.max(ba.yMin, bb.yMin)
               const openYMax = Math.min(ba.yMax, bb.yMax)
               const depth = getRegionFloorDepth(stlArrayBuffer, topZ, gapXMin, gapXMax, openYMin, openYMax)
-              if (depth < topZ - 0.5) {
-                xGaps.push({ direction: 'x', wallXMin: gapXMin, wallXMax: gapXMax, openYMin, openYMax, depth })
-              }
+              // depth = topZ when no floor found (through-slot) — still valid, accept all gaps
+              xGaps.push({ direction: 'x', wallXMin: gapXMin, wallXMax: gapXMax, openYMin, openYMax, depth })
             }
           }
         }
@@ -203,9 +330,8 @@ function detectOpenSlots(outerContours, stlArrayBuffer, topZ) {
               const openXMin = Math.max(ba.xMin, bb.xMin)
               const openXMax = Math.min(ba.xMax, bb.xMax)
               const depth = getRegionFloorDepth(stlArrayBuffer, topZ, openXMin, openXMax, gapYMin, gapYMax)
-              if (depth < topZ - 0.5) {
-                yGaps.push({ direction: 'y', wallYMin: gapYMin, wallYMax: gapYMax, openXMin, openXMax, depth })
-              }
+              // depth = topZ when no floor found (through-slot) — still valid, accept all gaps
+              yGaps.push({ direction: 'y', wallYMin: gapYMin, wallYMax: gapYMax, openXMin, openXMax, depth })
             }
           }
         }
@@ -339,6 +465,7 @@ export function detectFeatures(stlArrayBuffer, toolDiameter = 3.175) {
   for (const fz of floorZs) scanZSet.add(Math.round((fz - 0.05) * 100) / 100)
 
   const knownFeatures = []
+  const edgePocketKnown = []
   const groups = new Map()
 
   const sortedScanZ = [...scanZSet].filter(z => z > 0 && z < topZ).sort((a, b) => b - a)
@@ -348,6 +475,28 @@ export function detectFeatures(stlArrayBuffer, toolDiameter = 3.175) {
     if (contours.length === 0) continue
     const isOuter = classifyContours(contours)
     const featureDepths = getFeatureDepths(stlArrayBuffer, topZ, contours)
+
+    // Edge pocket detection: concave circular arcs in outer contours
+    for (let ci = 0; ci < contours.length; ci++) {
+      if (!isOuter[ci]) continue
+      for (const ep of detectEdgePocketsFromContour(contours[ci], stlArrayBuffer, topZ, sliceZ, toolDiameter)) {
+        if (edgePocketKnown.some(k => Math.hypot(k.cx - ep.cx, k.cy - ep.cy) < 2 && Math.abs(k.r - ep.r) < 1)) continue
+        edgePocketKnown.push(ep)
+        ops.push({
+          id: ops.length + 1,
+          type: 'edge-pocket',
+          label: `Edge Pocket ⌀${(ep.r * 2).toFixed(1)}mm`,
+          edgeCenter: [ep.cx, ep.cy],
+          edgeRadius: ep.r,
+          detectedDepth: ep.depth,
+          detectionSliceZ: sliceZ,
+          detectedCount: 1,
+          color: OP_COLORS[colorIdx++ % OP_COLORS.length],
+          enabled: true,
+          overrides: {},
+        })
+      }
+    }
 
     for (let ci = 0; ci < contours.length; ci++) {
       if (isOuter[ci]) continue
@@ -451,6 +600,30 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
 
     const topZ = getStlTopZ(stlArrayBuffer)
     const targetRadius = eop.detectedDiameter != null ? eop.detectedDiameter / 2 : null
+
+    if (eop.type === 'edge-pocket' && eop.edgeCenter && eop.edgeRadius) {
+      const [ecx, ecy] = eop.edgeCenter
+      const er = eop.edgeRadius
+      const startDepth = eop.detectionSliceZ != null ? topZ - eop.detectionSliceZ : 0
+      const effectiveDepth = eop.depth
+      if (effectiveDepth > 0) {
+        const zPasses = Math.ceil(effectiveDepth / stepdown)
+        const virtualContour = makeCircleContour(ecx, ecy, er)
+        const toolpaths = generatePocketPasses(virtualContour, toolRadius, eop.stepover)
+        for (let pass = 1; pass <= zPasses; pass++) {
+          const z = -Math.min(pass * stepdown, effectiveDepth)
+          if (pass * stepdown < startDepth - 0.001) continue
+          for (const path of toolpaths) {
+            if (path.length < 2) continue
+            const polyline = path.map(([x, y]) => [x, y, z])
+            polyline.push([path[0][0], path[0][1], z])
+            paths.push(polyline)
+          }
+        }
+      }
+      result.push({ label: eop.label, color, paths, operationId: eop.id, feedrate: eop.feedrate })
+      continue
+    }
 
     if (eop.type === 'pocket' && eop.centroids?.length) {
       // Each centroid may have been detected at a different sliceZ (e.g. miter bar thread holes
@@ -703,6 +876,38 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
   const targetRadius = eop.detectedDiameter != null ? eop.detectedDiameter / 2 : null
 
   lines.push(pp.rapidTo(undefined, undefined, originSafeZ))
+
+  if (eop.type === 'edge-pocket' && eop.edgeCenter && eop.edgeRadius) {
+    const [ecx, ecy] = eop.edgeCenter
+    const er = eop.edgeRadius
+    const startDepth = eop.detectionSliceZ != null ? topZ - eop.detectionSliceZ : 0
+    const effectiveDepth = eop.depth
+    if (effectiveDepth > 0) {
+      const zPasses = Math.ceil(effectiveDepth / stepdown)
+      const virtualContour = makeCircleContour(ecx, ecy, er)
+      const validPaths = generatePocketPasses(virtualContour, toolRadius, eop.stepover).filter(p => p.length >= 2)
+      if (validPaths.length > 0) {
+        for (let pass = 1; pass <= zPasses; pass++) {
+          const cutZ = zBase - Math.min(pass * stepdown, effectiveDepth)
+          if (pass * stepdown < startDepth - 0.001) continue
+          lines.push(pp.comment(`Edge pocket pass ${pass}/${zPasses} — depth ${(zBase - cutZ).toFixed(3)} mm`))
+          const [startX, startY] = validPaths[0][0]
+          lines.push(pp.rapidTo(startX, startY, safeZ))
+          lines.push(pp.linearTo(undefined, undefined, cutZ, eop.feedrate * 0.3))
+          for (let pi = 0; pi < validPaths.length; pi++) {
+            const path = validPaths[pi]
+            const [rx, ry] = path[0]
+            if (pi > 0) lines.push(pp.linearTo(rx, ry, undefined, eop.feedrate))
+            for (let k = 1; k < path.length; k++)
+              lines.push(pp.linearTo(path[k][0], path[k][1], undefined, eop.feedrate))
+            lines.push(pp.linearTo(rx, ry, undefined, eop.feedrate))
+          }
+          lines.push(pp.rapidTo(undefined, undefined, safeZ))
+        }
+      }
+    }
+    return lines
+  }
 
   if (eop.type === 'pocket' && eop.centroids?.length) {
     // Each centroid may have been detected at a different sliceZ. Use per-centroid slices so

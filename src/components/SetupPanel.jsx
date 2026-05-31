@@ -46,12 +46,10 @@ export default function SetupPanel() {
             <option value="spoilboard">Spoilboard</option>
           </select>
         </Field>
-        {machineSettings.zZeroMode === 'spoilboard' && (
-          <Field label="Material Thickness (mm)">
-            <NumInput value={machineSettings.materialThickness} min={0.1} step={0.5}
-              onChange={v => updateMachine('materialThickness', v)} />
-          </Field>
-        )}
+        <Field label="Material Thickness (mm)">
+          <NumInput value={machineSettings.materialThickness} min={0.1} step={0.5}
+            onChange={v => updateMachine('materialThickness', v)} />
+        </Field>
       </Section>
 
       {/* Global Tool */}

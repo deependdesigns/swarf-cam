@@ -299,6 +299,7 @@ export function disposeScene(state) {
   clearToolpaths(state)
   clearRapidMoves(state)
   clearToolHead(state)
+  clearStockMesh(state)
   if (state.mesh) {
     state.mesh.geometry.dispose()
     state.mesh.material.dispose()
@@ -309,4 +310,140 @@ export function disposeScene(state) {
   }
   state.renderer.dispose()
   state.container.removeChild(state.renderer.domElement)
+}
+
+// ── Stock simulation mesh ──────────────────────────────────────────────────────
+
+const _stockColor = new THREE.Color(0.72, 0.58, 0.38)  // raw-wood tan
+const _cutColor   = new THREE.Color(0.50, 0.50, 0.52)  // machined surface grey
+
+export function clearStockMesh(state) {
+  if (!state.stockGroup) return
+  state.stockGroup.traverse(obj => {
+    obj.geometry?.dispose()
+    if (obj.material) {
+      if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose())
+      else obj.material.dispose()
+    }
+  })
+  state.scene.remove(state.stockGroup)
+  state.stockGroup = null
+}
+
+// Build a complete stock block mesh: heightfield top surface + 5 static wall/bottom faces.
+// heightmap: Float32Array[gridRes*gridRes] — remaining height from stock bottom at each (i,j) cell.
+// Vertex colors on the top surface encode depth (tan = untouched, grey = machined).
+export function buildStockMesh(state, heightmap, stockX, stockY, materialThickness, gridRes = 256) {
+  clearStockMesh(state)
+  const group = new THREE.Group()
+
+  // ── Top surface height-field ──────────────────────────────────────────────
+  const n = gridRes * gridRes
+  const pos = new Float32Array(n * 3)
+  const col = new Float32Array(n * 3)
+
+  for (let j = 0; j < gridRes; j++) {
+    for (let i = 0; i < gridRes; i++) {
+      const h   = heightmap[i + j * gridRes]
+      const b3  = (j * gridRes + i) * 3
+      pos[b3    ] = i * stockX / (gridRes - 1)
+      pos[b3 + 1] = h
+      pos[b3 + 2] = -(j * stockY / (gridRes - 1))
+      const t   = materialThickness > 0 ? Math.max(0, Math.min(1, 1 - h / materialThickness)) : 0
+      col[b3    ] = _stockColor.r + (_cutColor.r - _stockColor.r) * t
+      col[b3 + 1] = _stockColor.g + (_cutColor.g - _stockColor.g) * t
+      col[b3 + 2] = _stockColor.b + (_cutColor.b - _stockColor.b) * t
+    }
+  }
+
+  // Indices: winding a,b,c / b,d,c so normals face +Y (up)
+  const idxArr = new Uint32Array((gridRes - 1) * (gridRes - 1) * 6)
+  let ii = 0
+  for (let j = 0; j < gridRes - 1; j++) {
+    for (let i = 0; i < gridRes - 1; i++) {
+      const a = j * gridRes + i, b = a + 1, c = a + gridRes, d = c + 1
+      idxArr[ii++] = a; idxArr[ii++] = b; idxArr[ii++] = c
+      idxArr[ii++] = b; idxArr[ii++] = d; idxArr[ii++] = c
+    }
+  }
+
+  const topGeo = new THREE.BufferGeometry()
+  topGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  topGeo.setAttribute('color',    new THREE.BufferAttribute(col, 3))
+  topGeo.setIndex(new THREE.BufferAttribute(idxArr, 1))
+  topGeo.computeVertexNormals()
+
+  const topMesh = new THREE.Mesh(topGeo, new THREE.MeshStandardMaterial({
+    vertexColors: true, metalness: 0.05, roughness: 0.88, side: THREE.FrontSide,
+  }))
+  topMesh.castShadow = true
+  topMesh.receiveShadow = true
+  topMesh.userData.isStockTop = true
+  group.add(topMesh)
+
+  // ── Side walls + bottom (static) ─────────────────────────────────────────
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0xb8955f, metalness: 0.04, roughness: 0.92, side: THREE.DoubleSide })
+  const W = stockX, D = stockY, H = materialThickness
+
+  function addWall(p0, p1, p2, p3) {
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([...p0, ...p1, ...p2, ...p3]), 3))
+    g.setIndex([0, 1, 2, 1, 3, 2])
+    g.computeVertexNormals()
+    const m = new THREE.Mesh(g, wallMat)
+    m.receiveShadow = true
+    group.add(m)
+  }
+
+  // Front (CNC Y=0, Three.js Z=0)
+  addWall([0,0,0],  [W,0,0],  [0,H,0],  [W,H,0])
+  // Back (CNC Y=D, Three.js Z=-D)
+  addWall([W,0,-D], [0,0,-D], [W,H,-D], [0,H,-D])
+  // Left (CNC X=0, Three.js X=0)
+  addWall([0,0,-D], [0,0,0],  [0,H,-D], [0,H,0])
+  // Right (CNC X=W, Three.js X=W)
+  addWall([W,0,0],  [W,0,-D], [W,H,0],  [W,H,-D])
+  // Bottom
+  addWall([0,0,0],  [0,0,-D], [W,0,0],  [W,0,-D])
+
+  state.scene.add(group)
+  state.stockGroup = group
+}
+
+// Update only the top-surface vertices after a new simulation run (avoids rebuilding walls).
+export function updateStockHeights(state, heightmap, stockX, stockY, materialThickness, gridRes = 256) {
+  if (!state.stockGroup) return
+  const topMesh = state.stockGroup.children.find(c => c.userData.isStockTop)
+  if (!topMesh?.geometry) return
+
+  const pos = topMesh.geometry.attributes.position.array
+  const col = topMesh.geometry.attributes.color.array
+
+  for (let j = 0; j < gridRes; j++) {
+    for (let i = 0; i < gridRes; i++) {
+      const h  = heightmap[i + j * gridRes]
+      const b3 = (j * gridRes + i) * 3
+      pos[b3 + 1] = h
+      const t  = materialThickness > 0 ? Math.max(0, Math.min(1, 1 - h / materialThickness)) : 0
+      col[b3    ] = _stockColor.r + (_cutColor.r - _stockColor.r) * t
+      col[b3 + 1] = _stockColor.g + (_cutColor.g - _stockColor.g) * t
+      col[b3 + 2] = _stockColor.b + (_cutColor.b - _stockColor.b) * t
+    }
+  }
+
+  topMesh.geometry.attributes.position.needsUpdate = true
+  topMesh.geometry.attributes.color.needsUpdate = true
+  topMesh.geometry.computeVertexNormals()
+}
+
+// Position camera to frame the full stock block nicely from above-front-right.
+export function fitCameraToStock(state, stockX, stockY, materialThickness) {
+  const cx = stockX / 2
+  const cz = -stockY / 2
+  const maxDim = Math.max(stockX, stockY)
+  const fov = state.camera.fov * (Math.PI / 180)
+  const dist = (maxDim / (2 * Math.sin(fov / 2))) * 0.75
+  state.camera.position.set(cx + dist * 0.55, dist * 0.45, cz + dist * 0.65)
+  state.controls.target.set(cx, materialThickness * 0.3, cz)
+  state.controls.update()
 }
