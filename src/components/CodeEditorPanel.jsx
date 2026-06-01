@@ -2,6 +2,7 @@ import { useRef } from 'react'
 import Editor from '@monaco-editor/react'
 import { useAppState } from '../context/AppStateContext'
 import { compileOpenSCAD } from '../lib/openscadCompiler'
+import { track } from '../lib/analytics'
 
 export default function CodeEditorPanel({ onCollapse }) {
   const { scadCode, setScadCode, setStlData, compiling, setCompiling, setCompileError, compileError } = useAppState()
@@ -12,13 +13,16 @@ export default function CodeEditorPanel({ onCollapse }) {
   }
 
   async function handleCompile() {
+    track.compileClicked()
     setCompiling(true)
     setCompileError(null)
     try {
       const stl = await compileOpenSCAD(scadCode)
       setStlData(stl)
+      track.compileSuccess()
     } catch (err) {
       setCompileError(err.message || 'Compilation failed')
+      track.compileError(err.message || 'Compilation failed')
     } finally {
       setCompiling(false)
     }

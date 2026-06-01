@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import Editor from '@monaco-editor/react'
 import { useAppState } from '../context/AppStateContext'
+import { track } from '../lib/analytics'
 
 const STATUS_CONFIG = {
   generating: { icon: '⚙️', text: 'Generating…', cls: 'text-[#888]' },
@@ -69,23 +70,29 @@ export default function GcodePanel() {
 
       // Exact match on a motion line
       if (linesToProgress.has(lineIndex)) {
+        track.gcodeLineClicked()
         jumpToProgress(linesToProgress.get(lineIndex))
         return
       }
       // Find the nearest motion line at or before the clicked line
       for (let i = progressToLine.length - 1; i >= 0; i--) {
         if (progressToLine[i].lineIndex <= lineIndex) {
+          track.gcodeLineClicked()
           jumpToProgress(progressToLine[i].progress)
           return
         }
       }
       // Before all motion lines: jump to start
-      if (progressToLine.length) jumpToProgress(progressToLine[0].progress)
+      if (progressToLine.length) {
+        track.gcodeLineClicked()
+        jumpToProgress(progressToLine[0].progress)
+      }
     })
   }
 
   function handleDownload() {
     if (!gcode) return
+    track.gcodeDownloaded()
     const blob = new Blob([gcode], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')

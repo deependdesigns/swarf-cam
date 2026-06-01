@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import SetupPanel from './SetupPanel'
 import OperationsPanel from './OperationsPanel'
+import { track } from '../lib/analytics'
 
 const TABS = [
   { id: 'setup', label: 'Setup' },
@@ -20,7 +21,7 @@ export default function RightPanel({ onCollapse }) {
         {TABS.map(tab => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => { setActiveTab(tab.id); track.rightPanelTabSwitched(tab.id) }}
             className={`flex-1 py-2 text-xs transition-colors ${
               activeTab === tab.id
                 ? 'text-[#c8c8c8] border-b-2 border-[#6b9fff] bg-[#141414]'

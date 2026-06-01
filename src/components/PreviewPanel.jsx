@@ -8,6 +8,7 @@ import {
   clearStockMesh, buildStockMesh, fitCameraToStock,
 } from '../lib/threeScene'
 import { getPositionAtProgress, getMoveAtProgress } from '../lib/gcodeGenerator'
+import { track } from '../lib/analytics'
 import { parseGcode, simulateMilling } from '../lib/millingSimulator'
 
 const SPEEDS = [0.5, 1, 2, 5, 10]
@@ -206,6 +207,7 @@ export default function PreviewPanel() {
     isPlayingRef.current = next
     setIsPlaying(next)
     if (next) {
+      track.timelinePlayed()
       if (progressRef.current >= 1) { progressRef.current = 0; setSimProgress(0) }
       lastTimeRef.current = null
       animRafRef.current = requestAnimationFrame(runAnimFrame)
@@ -224,7 +226,7 @@ export default function PreviewPanel() {
     }
   }
 
-  function handleSpeed(speed) { playSpeedRef.current = speed; setPlaySpeed(speed) }
+  function handleSpeed(speed) { playSpeedRef.current = speed; setPlaySpeed(speed); track.timelineSpeedChanged(speed) }
 
   const currentPos  = moveSequence ? getPositionAtProgress(moveSequence, simProgress) : null
   const currentMove = moveSequence ? getMoveAtProgress(moveSequence, simProgress) : null
@@ -240,7 +242,7 @@ export default function PreviewPanel() {
         {/* Mode tab switcher */}
         <div className="flex bg-[#111] border border-[#222] rounded overflow-hidden shrink-0">
           <button
-            onClick={() => setPreviewMode('render')}
+            onClick={() => { setPreviewMode('render'); track.previewModeChanged('render') }}
             className={`px-3 py-1 text-xs transition-colors ${
               !inMillingMode
                 ? 'bg-[#1a2a3a] text-[#6b9fff]'
@@ -251,7 +253,7 @@ export default function PreviewPanel() {
           </button>
           <div className="w-px bg-[#2a2a2a] self-stretch" />
           <button
-            onClick={() => setPreviewMode('milling')}
+            onClick={() => { setPreviewMode('milling'); track.previewModeChanged('milling') }}
             className={`px-3 py-1 text-xs transition-colors ${
               inMillingMode
                 ? 'bg-[#2a1a0a] text-[#e8a840]'

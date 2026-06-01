@@ -1,4 +1,5 @@
 import { useAppState } from '../context/AppStateContext'
+import { track } from '../lib/analytics'
 
 const POST_PROCESSORS = [
   { id: 'grbl', label: 'GRBL' },
@@ -26,7 +27,7 @@ export default function Header() {
         <label className="text-[#666] text-xs">Post:</label>
         <select
           value={postProcessor}
-          onChange={(e) => setPostProcessor(e.target.value)}
+          onChange={(e) => { setPostProcessor(e.target.value); track.postProcessorChanged(e.target.value) }}
           className="bg-[#1a1a1a] border border-[#333] text-[#c8c8c8] text-xs px-2 py-1 rounded focus:outline-none focus:border-[#6b9fff]"
         >
           {POST_PROCESSORS.map((pp) => (
