@@ -20,6 +20,7 @@ export default function Header() {
           <span className="text-[#e0e0e0] font-bold tracking-widest text-sm uppercase">
             ⚙ Swarf<span className="text-[#6b9fff]">.cam</span>
           </span>
+          <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-[#1e2a1e] text-[#5a9e5a] border border-[#2a4a2a]">beta</span>
           <span className="text-[#3a3a3a] text-xs">|</span>
           <span className="text-[#555] text-xs">browser CNC CAM</span>
           <span className="text-[#3a3a3a] text-xs">|</span>

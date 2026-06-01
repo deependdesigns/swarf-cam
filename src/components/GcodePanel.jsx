@@ -130,6 +130,11 @@ export default function GcodePanel() {
         </div>
       </div>
 
+      <div className="flex items-center gap-1.5 px-3 py-1.5 bg-[#0f1a0f] border-b border-[#1e3a1e] shrink-0">
+        <span className="text-[#4a7a4a] text-[10px]">⚠</span>
+        <span className="text-[#4a7a4a] text-[10px]">Experimental — simulate before running on hardware.</span>
+      </div>
+
       <div className="flex-1 min-h-0">
         <Editor
           height="100%"
