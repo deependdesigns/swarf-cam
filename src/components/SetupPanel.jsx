@@ -46,7 +46,20 @@ export default function SetupPanel() {
             <option value="spoilboard">Spoilboard</option>
           </select>
         </Field>
-        <Field label="Material Thickness (mm)">
+      </Section>
+
+      {/* Material */}
+      <Section label="Material">
+        <div className="text-[#555] text-xs mb-2">Stock block dimensions for simulation.</div>
+        <Field label="Width — X (mm)">
+          <NumInput value={machineSettings.materialWidth ?? 150} min={1} step={10}
+            onChange={v => updateMachine('materialWidth', v)} />
+        </Field>
+        <Field label="Length — Y (mm)">
+          <NumInput value={machineSettings.materialLength ?? 150} min={1} step={10}
+            onChange={v => updateMachine('materialLength', v)} />
+        </Field>
+        <Field label="Thickness — Z (mm)">
           <NumInput value={machineSettings.materialThickness} min={0.1} step={0.5}
             onChange={v => updateMachine('materialThickness', v)} />
         </Field>

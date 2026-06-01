@@ -238,6 +238,13 @@ function generatePocketPasses(contour, toolRadius, stepoverPct) {
   return inward.flat()
 }
 
+// Reverse polygon winding for conventional milling (default winding = climb).
+// Keeps the start vertex fixed so the rapid-to point doesn't change.
+function applyDirection(paths, direction) {
+  if (direction !== 'conventional') return paths
+  return paths.map(p => p.length > 1 ? [p[0], ...p.slice(1).reverse()] : p)
+}
+
 // Build a closed virtual polygon for a slot. Extended by toolR in the open direction(s)
 // so that the first inward pocket offset (at toolR) lands exactly at the wall/opening boundary.
 function buildSlotVirtualContour(s, toolR) {
@@ -584,7 +591,7 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
       const effectiveDepth = Math.min(eop.depth, eop.slotBounds.depth)
       const zPasses = Math.ceil(effectiveDepth / stepdown)
       const virtualContour = buildSlotVirtualContour(eop.slotBounds, toolRadius)
-      const toolpaths = generatePocketPasses(virtualContour, toolRadius, eop.stepover)
+      const toolpaths = applyDirection(generatePocketPasses(virtualContour, toolRadius, eop.stepover), eop.direction)
       for (let pass = 1; pass <= zPasses; pass++) {
         const z = -Math.min(pass * stepdown, effectiveDepth)
         for (const path of toolpaths) {
@@ -609,7 +616,7 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
       if (effectiveDepth > 0) {
         const zPasses = Math.ceil(effectiveDepth / stepdown)
         const virtualContour = makeCircleContour(ecx, ecy, er)
-        const toolpaths = generatePocketPasses(virtualContour, toolRadius, eop.stepover)
+        const toolpaths = applyDirection(generatePocketPasses(virtualContour, toolRadius, eop.stepover), eop.direction)
         for (let pass = 1; pass <= zPasses; pass++) {
           const z = -Math.min(pass * stepdown, effectiveDepth)
           if (pass * stepdown < startDepth - 0.001) continue
@@ -652,7 +659,7 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
           const effectiveDepth = Math.min(eop.depth, sDepths[ci])
           if (effectiveDepth <= 0) continue
           const zPasses = Math.ceil(effectiveDepth / stepdown)
-          const toolpaths = generatePocketPasses(sc[ci], toolRadius, eop.stepover)
+          const toolpaths = applyDirection(generatePocketPasses(sc[ci], toolRadius, eop.stepover), eop.direction)
           for (let pass = 1; pass <= zPasses; pass++) {
             const z = -Math.min(pass * stepdown, effectiveDepth)
             if (pass * stepdown < startDepth - 0.001) continue
@@ -680,9 +687,12 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
         const effectiveDepth = Math.min(eop.depth, featureDepths[ci])
         if (effectiveDepth <= 0) continue
         const zPasses = Math.ceil(effectiveDepth / stepdown)
-        const toolpaths = eop.type === 'pocket'
-          ? generatePocketPasses(contours[ci], toolRadius, eop.stepover)
-          : offsetContours([contours[ci]], toolRadius)
+        const toolpaths = applyDirection(
+          eop.type === 'pocket'
+            ? generatePocketPasses(contours[ci], toolRadius, eop.stepover)
+            : offsetContours([contours[ci]], toolRadius),
+          eop.direction
+        )
         for (let pass = 1; pass <= zPasses; pass++) {
           const z = -Math.min(pass * stepdown, effectiveDepth)
           if (pass * stepdown < startDepth - 0.001) continue
@@ -738,14 +748,18 @@ export function computeRapidPaths(toolpathData, safeZ = 5) {
 // Simulated rapid feedrate (mm/min) — G0 moves use machine max speed, approximate here.
 const RAPID_FEEDRATE = 5000
 
-// Returns { moves, totalLength, totalTime } where each move has { type, points, feedrate, startDist, dist }
+// Returns { moves, totalLength, totalTime, opRanges } where each move has { type, points, feedrate, startDist, dist }
+// opRanges: [{ operationId, startDist, endDist }] — distance range for each operation in the sequence.
 // totalTime is in seconds at actual feedrates, used to drive the timeline simulation at true speed.
 export function computeMoveSequence(toolpathData, safeZ = 5) {
   const moves = []
   let lastX = 0, lastY = 0, lastZ = safeZ
+  const opMoveStarts = []
 
   for (const op of toolpathData) {
     const feedrate = op.feedrate ?? 1000
+    opMoveStarts.push({ operationId: op.operationId, startIdx: moves.length })
+
     for (const path of op.paths) {
       if (!path?.length) continue
       const [sx, sy, sz] = path[0]
@@ -785,7 +799,100 @@ export function computeMoveSequence(toolpathData, safeZ = 5) {
     totalTime += move.dist / ((move.feedrate ?? RAPID_FEEDRATE) / 60)
   }
 
-  return { moves, totalLength: cumDist, totalTime }
+  const opRanges = opMoveStarts.map((r, i) => {
+    const nextIdx = opMoveStarts[i + 1]?.startIdx ?? moves.length
+    const startDist = r.startIdx < moves.length ? moves[r.startIdx].startDist : cumDist
+    const endDist   = nextIdx   < moves.length ? moves[nextIdx].startDist   : cumDist
+    return { operationId: r.operationId, startDist, endDist }
+  })
+
+  return { moves, totalLength: cumDist, totalTime, opRanges }
+}
+
+// Maps G-code line indices to progress values from moveSeq using XY coordinate matching.
+//
+// The G-code and computeMoveSequence walk the same toolpaths in the same order, so their
+// XY positions align — but their total distances differ because:
+//   - G-code adds origin-return moves (G0 X0 Y0) and origin-safe-Z raises per operation
+//   - computeMoveSequence lifts/plunges between every adjacent path; G-code connects paths
+//     within the same pass with feed moves at depth (no intermediate lift)
+//
+// Using distance-based progress from the G-code string therefore drifts from simProgress.
+// Instead, we build a flat list of (x, y, progress) from moveSeq and sequentially match
+// each G-code motion line to the nearest forward XY point in that list.
+// Z-only G-code lines (origin height raises) and return-to-origin lines (X0 Y0) are skipped
+// because they have no corresponding point in moveSeq.
+//
+// Returns { progressToLine: [{lineIndex, progress}], linesToProgress: Map<lineIndex, progress> } or null.
+export function buildGcodeLineMap(gcode, moveSeq) {
+  if (!gcode || !moveSeq?.moves?.length || !moveSeq.totalLength) return null
+
+  // Flatten all move points to (x, y, progress) in sequence order
+  const seqPoints = []
+  for (const move of moveSeq.moves) {
+    let localDist = 0
+    const pts = move.points
+    for (let i = 0; i < pts.length; i++) {
+      if (i > 0) localDist += Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1], pts[i][2]-pts[i-1][2])
+      seqPoints.push({ x: pts[i][0], y: pts[i][1], progress: (move.startDist + localDist) / moveSeq.totalLength })
+    }
+  }
+
+  // Parse G-code — only collect lines that explicitly move X or Y (skip Z-only raises)
+  const lines = gcode.split('\n')
+  let cx = 0, cy = 0, cz = 0
+  let isRapid = true
+  const gcodeMotions = []
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/;.*/, '').trim()
+    if (!line) continue
+    let nx = cx, ny = cy, nz = cz
+    let hasX = false, hasY = false, hasG0 = false, hasG1 = false
+    for (const word of (line.toUpperCase().match(/[A-Z][+-]?[0-9.]+/g) ?? [])) {
+      const letter = word[0], val = parseFloat(word.slice(1))
+      if      (letter === 'G' && val === 0) hasG0 = true
+      else if (letter === 'G' && val === 1) hasG1 = true
+      else if (letter === 'X') { nx = val; hasX = true }
+      else if (letter === 'Y') { ny = val; hasY = true }
+      else if (letter === 'Z') { nz = val }
+    }
+    if (hasG0) isRapid = true
+    if (hasG1) isRapid = false
+
+    if ((hasX || hasY) && (nx !== cx || ny !== cy || nz !== cz)) {
+      gcodeMotions.push({ lineIndex: i, x: nx, y: ny })
+    }
+    if (nx !== cx || ny !== cy || nz !== cz) { cx = nx; cy = ny; cz = nz }
+  }
+
+  // Sequential forward walk: match each G-code XY motion to the nearest seqPoint
+  const MATCH_TOL = 0.02  // mm — G-code is toFixed(4), seqPoints are full-precision
+  const progressToLine = []
+  const linesToProgress = new Map()
+  let seqIdx = 0
+
+  for (const gcm of gcodeMotions) {
+    // Skip return-to-origin (footer G0 X0 Y0) — not in seqPoints
+    if (Math.abs(gcm.x) < MATCH_TOL && Math.abs(gcm.y) < MATCH_TOL) continue
+
+    let bestIdx = -1, bestDist = Infinity
+    const searchEnd = Math.min(seqIdx + 500, seqPoints.length)
+    for (let j = seqIdx; j < searchEnd; j++) {
+      const d = Math.hypot(gcm.x - seqPoints[j].x, gcm.y - seqPoints[j].y)
+      if (d < MATCH_TOL && d < bestDist) { bestDist = d; bestIdx = j }
+    }
+
+    if (bestIdx >= 0) {
+      const progress = seqPoints[bestIdx].progress
+      progressToLine.push({ lineIndex: gcm.lineIndex, progress })
+      linesToProgress.set(gcm.lineIndex, progress)
+      seqIdx = bestIdx + 1
+    }
+  }
+
+  if (!progressToLine.length) return null
+  return { progressToLine, linesToProgress }
 }
 
 // ── Timeline helpers ──────────────────────────────────────────────────────────
@@ -885,7 +992,7 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
     if (effectiveDepth > 0) {
       const zPasses = Math.ceil(effectiveDepth / stepdown)
       const virtualContour = makeCircleContour(ecx, ecy, er)
-      const validPaths = generatePocketPasses(virtualContour, toolRadius, eop.stepover).filter(p => p.length >= 2)
+      const validPaths = applyDirection(generatePocketPasses(virtualContour, toolRadius, eop.stepover).filter(p => p.length >= 2), eop.direction)
       if (validPaths.length > 0) {
         for (let pass = 1; pass <= zPasses; pass++) {
           const cutZ = zBase - Math.min(pass * stepdown, effectiveDepth)
@@ -935,7 +1042,7 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
         const effectiveDepth = Math.min(eop.depth, sDepths[ci])
         if (effectiveDepth <= 0) continue
         const zPasses = Math.ceil(effectiveDepth / stepdown)
-        const validPaths = generatePocketPasses(sc[ci], toolRadius, eop.stepover).filter(p => p.length >= 2)
+        const validPaths = applyDirection(generatePocketPasses(sc[ci], toolRadius, eop.stepover).filter(p => p.length >= 2), eop.direction)
         if (validPaths.length === 0) continue
 
         for (let pass = 1; pass <= zPasses; pass++) {
@@ -974,9 +1081,12 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
       const effectiveDepth = Math.min(eop.depth, featureDepths[ci])
       if (effectiveDepth <= 0) continue
       const zPasses = Math.ceil(effectiveDepth / stepdown)
-      const toolpaths = eop.type === 'pocket'
-        ? generatePocketPasses(contours[ci], toolRadius, eop.stepover)
-        : offsetContours([contours[ci]], toolRadius)
+      const toolpaths = applyDirection(
+        eop.type === 'pocket'
+          ? generatePocketPasses(contours[ci], toolRadius, eop.stepover)
+          : offsetContours([contours[ci]], toolRadius),
+        eop.direction
+      )
 
       if (eop.type === 'pocket') {
         const validPaths = toolpaths.filter(p => p.length >= 2)
@@ -1053,7 +1163,7 @@ function generateSlot(eop, pp, safeZ, originSafeZ, ms, zBase) {
   const effectiveDepth = Math.min(eop.depth, slotBounds.depth)
   const zPasses = Math.ceil(effectiveDepth / stepdown)
   const virtualContour = buildSlotVirtualContour(slotBounds, toolRadius)
-  const validPaths = generatePocketPasses(virtualContour, toolRadius, eop.stepover).filter(p => p.length >= 2)
+  const validPaths = applyDirection(generatePocketPasses(virtualContour, toolRadius, eop.stepover).filter(p => p.length >= 2), eop.direction)
 
   if (validPaths.length === 0) {
     lines.push(pp.comment('No slot paths'))

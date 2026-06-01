@@ -33,3 +33,9 @@
     background: #555;
   }
 }
+
+/* Monaco G-code current-line highlight */
+.gcode-current-line {
+  background: rgba(107, 159, 255, 0.12) !important;
+  border-left: 2px solid #6b9fff !important;
+}

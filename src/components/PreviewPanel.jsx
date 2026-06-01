@@ -11,7 +11,7 @@ import { getPositionAtProgress, getMoveAtProgress } from '../lib/gcodeGenerator'
 import { parseGcode, simulateMilling } from '../lib/millingSimulator'
 
 const SPEEDS = [0.5, 1, 2, 5, 10]
-const GRID_RES = 256
+const GRID_RES = 512
 
 export default function PreviewPanel() {
   const {
@@ -19,10 +19,11 @@ export default function PreviewPanel() {
     selectedOperationId, machineSettings, globalToolSettings,
     showRapids, setShowRapids, modelTransparent, setModelTransparent,
     rapidPaths, moveSequence, gcode,
+    simProgress, setSimProgress, progressJumpRequest,
   } = useAppState()
 
-  const mountRef  = useRef(null)
-  const sceneRef  = useRef(null)
+  const mountRef     = useRef(null)
+  const sceneRef     = useRef(null)
   const moveSeqRef   = useRef(null)
   const progressRef  = useRef(0)
   const isPlayingRef = useRef(false)
@@ -30,14 +31,28 @@ export default function PreviewPanel() {
   const lastTimeRef  = useRef(null)
   const animRafRef   = useRef(null)
 
-  const [simProgress,  setSimProgress]  = useState(0)
-  const [isPlaying,    setIsPlaying]    = useState(false)
-  const [playSpeed,    setPlaySpeed]    = useState(1)
-  const [previewMode,  setPreviewMode]  = useState('render')  // 'render' | 'milling'
-  const [simulating,   setSimulating]   = useState(false)
-  const [heightmap,    setHeightmap]    = useState(null)
+  const [isPlaying,   setIsPlaying]   = useState(false)
+  const [playSpeed,   setPlaySpeed]   = useState(1)
+  const [previewMode, setPreviewMode] = useState('render')  // 'render' | 'milling'
+  const [simulating,  setSimulating]  = useState(false)
+  const [heightmap,   setHeightmap]   = useState(null)
 
   useEffect(() => { moveSeqRef.current = moveSequence }, [moveSequence])
+
+  // Handle jump requests from GcodePanel / OperationsPanel
+  useEffect(() => {
+    if (!progressJumpRequest) return
+    isPlayingRef.current = false
+    setIsPlaying(false)
+    cancelAnimationFrame(animRafRef.current)
+    const p = Math.max(0, Math.min(1, progressJumpRequest.progress))
+    progressRef.current = p
+    setSimProgress(p)
+    if (sceneRef.current && moveSeqRef.current) {
+      const pos = getPositionAtProgress(moveSeqRef.current, p)
+      if (pos) positionToolHead(sceneRef.current, pos)
+    }
+  }, [progressJumpRequest])
 
   // ── Init scene ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -52,30 +67,28 @@ export default function PreviewPanel() {
     }
   }, [])
 
-  // ── STL load ────────────────────────────────────────────────────────────────
+  // ── STL load ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (sceneRef.current && stlData) {
-      loadStlIntoScene(sceneRef.current, stlData)
-      // Hide immediately if in milling mode
-      if (previewMode === 'milling' && sceneRef.current.mesh) {
-        sceneRef.current.mesh.visible = false
-      }
-    }
+    if (sceneRef.current && stlData) loadStlIntoScene(sceneRef.current, stlData)
   }, [stlData])
 
-  // ── STL visibility based on preview mode ────────────────────────────────────
+  // ── STL visibility and opacity ───────────────────────────────────────────────
+  // In milling mode: hidden by default; Ghost button shows the model as a reference overlay.
+  // In render mode: opaque by default; Ghost button makes it transparent.
   useEffect(() => {
     if (!sceneRef.current?.mesh) return
-    sceneRef.current.mesh.visible = previewMode !== 'milling'
-  }, [previewMode])
+    if (previewMode === 'milling') {
+      sceneRef.current.mesh.visible = modelTransparent
+      if (modelTransparent) setMeshOpacity(sceneRef.current, true)
+    } else {
+      sceneRef.current.mesh.visible = true
+      setMeshOpacity(sceneRef.current, modelTransparent)
+    }
+  }, [previewMode, modelTransparent, stlData])
 
-  // ── Toolpaths ───────────────────────────────────────────────────────────────
+  // ── Toolpaths ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!sceneRef.current) return
-    if (previewMode === 'milling') {
-      clearToolpaths(sceneRef.current)
-      return
-    }
     if (showToolpaths && toolpathData) {
       renderToolpaths(sceneRef.current, toolpathData)
       highlightOperation(sceneRef.current, selectedOperationId)
@@ -84,36 +97,24 @@ export default function PreviewPanel() {
     }
   }, [toolpathData, showToolpaths, previewMode])
 
-  // ── Highlight operation ─────────────────────────────────────────────────────
+  // ── Highlight selected operation ─────────────────────────────────────────────
   useEffect(() => {
-    if (sceneRef.current && previewMode !== 'milling') {
-      highlightOperation(sceneRef.current, selectedOperationId)
-    }
+    if (sceneRef.current) highlightOperation(sceneRef.current, selectedOperationId)
   }, [selectedOperationId])
 
-  // ── Work area ───────────────────────────────────────────────────────────────
+  // ── Work area boundary ───────────────────────────────────────────────────────
   useEffect(() => {
-    if (sceneRef.current) {
-      updateWorkArea(sceneRef.current, machineSettings.workAreaX, machineSettings.workAreaY)
-    }
+    if (sceneRef.current) updateWorkArea(sceneRef.current, machineSettings.workAreaX, machineSettings.workAreaY)
   }, [machineSettings.workAreaX, machineSettings.workAreaY])
 
-  // ── Rapid moves ─────────────────────────────────────────────────────────────
+  // ── Rapid moves ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!sceneRef.current) return
-    if (previewMode === 'milling') { clearRapidMoves(sceneRef.current); return }
     if (showRapids && rapidPaths) renderRapidMoves(sceneRef.current, rapidPaths)
     else clearRapidMoves(sceneRef.current)
   }, [rapidPaths, showRapids, previewMode])
 
-  // ── Model transparency ──────────────────────────────────────────────────────
-  useEffect(() => {
-    if (sceneRef.current && previewMode !== 'milling') {
-      setMeshOpacity(sceneRef.current, modelTransparent)
-    }
-  }, [modelTransparent, stlData, previewMode])
-
-  // ── Move sequence / tool head ───────────────────────────────────────────────
+  // ── Tool head ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!sceneRef.current) return
     isPlayingRef.current = false
@@ -121,11 +122,6 @@ export default function PreviewPanel() {
     cancelAnimationFrame(animRafRef.current)
     progressRef.current = 0
     setSimProgress(0)
-
-    if (previewMode === 'milling') {
-      clearToolHead(sceneRef.current)
-      return
-    }
 
     if (moveSequence?.moves?.length) {
       updateToolHead(sceneRef.current, globalToolSettings.toolDiameter)
@@ -136,21 +132,18 @@ export default function PreviewPanel() {
     }
   }, [moveSequence, previewMode])
 
-  // ── Milling simulation ──────────────────────────────────────────────────────
-  // Runs whenever the user is in milling mode and relevant inputs change.
+  // ── Milling simulation ───────────────────────────────────────────────────────
   useEffect(() => {
-    if (previewMode !== 'milling') {
-      setSimulating(false)
-      return
-    }
+    if (previewMode !== 'milling') { setSimulating(false); return }
+
+    const matW = machineSettings.materialWidth  ?? 150
+    const matL = machineSettings.materialLength ?? 150
 
     setSimulating(true)
     const id = setTimeout(() => {
       const moves  = parseGcode(gcode)
       const result = simulateMilling(
-        moves,
-        machineSettings.workAreaX,
-        machineSettings.workAreaY,
+        moves, matW, matL,
         machineSettings.materialThickness,
         machineSettings.zZeroMode,
         GRID_RES,
@@ -160,47 +153,40 @@ export default function PreviewPanel() {
     }, 0)
     return () => clearTimeout(id)
   }, [
-    previewMode,
-    gcode,
-    machineSettings.workAreaX,
-    machineSettings.workAreaY,
+    previewMode, gcode,
+    machineSettings.materialWidth,
+    machineSettings.materialLength,
     machineSettings.materialThickness,
     machineSettings.zZeroMode,
   ])
 
-  // ── Stock mesh rendering ────────────────────────────────────────────────────
+  // ── Stock mesh ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!sceneRef.current) return
+    const matW = machineSettings.materialWidth  ?? 150
+    const matL = machineSettings.materialLength ?? 150
     if (previewMode === 'milling' && heightmap) {
-      buildStockMesh(
-        sceneRef.current,
-        heightmap,
-        machineSettings.workAreaX,
-        machineSettings.workAreaY,
-        machineSettings.materialThickness,
-        GRID_RES,
-      )
-      fitCameraToStock(sceneRef.current, machineSettings.workAreaX, machineSettings.workAreaY, machineSettings.materialThickness)
+      buildStockMesh(sceneRef.current, heightmap, matW, matL, machineSettings.materialThickness, GRID_RES)
+      fitCameraToStock(sceneRef.current, matW, matL, machineSettings.materialThickness)
     } else if (previewMode !== 'milling') {
       clearStockMesh(sceneRef.current)
     }
-  }, [previewMode, heightmap, machineSettings.workAreaX, machineSettings.workAreaY, machineSettings.materialThickness])
+  }, [previewMode, heightmap, machineSettings.materialWidth, machineSettings.materialLength, machineSettings.materialThickness])
 
-  // ── Animation loop ──────────────────────────────────────────────────────────
+  // ── Animation loop ───────────────────────────────────────────────────────────
   const runAnimFrame = useCallback((timestamp) => {
     if (!isPlayingRef.current) { lastTimeRef.current = null; return }
 
     if (lastTimeRef.current !== null) {
-      const delta     = (timestamp - lastTimeRef.current) / 1000
-      const totalTime = moveSeqRef.current?.totalTime ?? 20
-      const newProg   = Math.min(1, progressRef.current + (delta * playSpeedRef.current) / totalTime)
+      const delta    = (timestamp - lastTimeRef.current) / 1000
+      const total    = moveSeqRef.current?.totalTime ?? 20
+      const newProg  = Math.min(1, progressRef.current + (delta * playSpeedRef.current) / total)
       progressRef.current = newProg
 
       if (sceneRef.current && moveSeqRef.current) {
         const pos = getPositionAtProgress(moveSeqRef.current, newProg)
         if (pos) positionToolHead(sceneRef.current, pos)
       }
-
       setSimProgress(newProg)
 
       if (newProg >= 1) {
@@ -238,102 +224,96 @@ export default function PreviewPanel() {
     }
   }
 
-  function handleSpeed(speed) {
-    playSpeedRef.current = speed
-    setPlaySpeed(speed)
-  }
-
-  function handleModeToggle() {
-    setPreviewMode(m => m === 'render' ? 'milling' : 'render')
-  }
+  function handleSpeed(speed) { playSpeedRef.current = speed; setPlaySpeed(speed) }
 
   const currentPos  = moveSequence ? getPositionAtProgress(moveSequence, simProgress) : null
   const currentMove = moveSequence ? getMoveAtProgress(moveSequence, simProgress) : null
-
-  const moveTypeColor = {
-    rapid: 'text-[#aa8800]',
-    plunge: 'text-[#cc7700]',
-    feed: 'text-[#3a9a4a]',
-  }
-
+  const moveTypeColor = { rapid: 'text-[#aa8800]', plunge: 'text-[#cc7700]', feed: 'text-[#3a9a4a]' }
   const inMillingMode = previewMode === 'milling'
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 bg-[#141414] border-b border-[#2a2a2a] shrink-0">
-        <span className="text-[#888] text-xs uppercase tracking-wider">
-          {inMillingMode ? 'Stock Simulation' : '3D Preview'}
-        </span>
-        <div className="flex items-center gap-2">
 
-          {/* Mode toggle */}
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-[#141414] border-b border-[#2a2a2a] shrink-0 flex-wrap">
+
+        {/* Mode tab switcher */}
+        <div className="flex bg-[#111] border border-[#222] rounded overflow-hidden shrink-0">
           <button
-            onClick={handleModeToggle}
-            className={`px-2 py-1 text-xs border rounded transition-colors ${
-              inMillingMode
-                ? 'bg-[#2a1a0a] border-[#5a3a10] text-[#e8a840]'
-                : 'bg-[#1a1a1a] border-[#333] text-[#555]'
+            onClick={() => setPreviewMode('render')}
+            className={`px-3 py-1 text-xs transition-colors ${
+              !inMillingMode
+                ? 'bg-[#1a2a3a] text-[#6b9fff]'
+                : 'text-[#555] hover:text-[#888]'
             }`}
-            title={inMillingMode ? 'Switch to OpenSCAD render view' : 'Switch to stock simulation view'}
+          >
+            3D Model
+          </button>
+          <div className="w-px bg-[#2a2a2a] self-stretch" />
+          <button
+            onClick={() => setPreviewMode('milling')}
+            className={`px-3 py-1 text-xs transition-colors ${
+              inMillingMode
+                ? 'bg-[#2a1a0a] text-[#e8a840]'
+                : 'text-[#555] hover:text-[#888]'
+            }`}
           >
             Stock Sim
           </button>
+        </div>
 
-          {/* OpenSCAD Render controls — hidden in milling mode */}
-          {!inMillingMode && toolpathData && (
-            <>
-              <button
-                onClick={() => setShowToolpaths(v => !v)}
-                className={`px-2 py-1 text-xs border rounded transition-colors ${
-                  showToolpaths
-                    ? 'bg-[#0d2a1a] border-[#1a5a2a] text-[#69f0ae]'
-                    : 'bg-[#1a1a1a] border-[#333] text-[#555]'
-                }`}
-              >
-                Paths
-              </button>
-              <button
-                onClick={() => setShowRapids(v => !v)}
-                className={`px-2 py-1 text-xs border rounded transition-colors ${
-                  showRapids
-                    ? 'bg-[#2a2000] border-[#554400] text-[#ddaa22]'
-                    : 'bg-[#1a1a1a] border-[#333] text-[#555]'
-                }`}
-              >
-                Rapids
-              </button>
-              <button
-                onClick={() => setModelTransparent(v => !v)}
-                className={`px-2 py-1 text-xs border rounded transition-colors ${
-                  modelTransparent
-                    ? 'bg-[#0d1a2a] border-[#1a3a5a] text-[#6b9fff]'
-                    : 'bg-[#1a1a1a] border-[#333] text-[#555]'
-                }`}
-              >
-                Ghost
-              </button>
-            </>
-          )}
-
-          {/* Simulating indicator */}
-          {inMillingMode && simulating && (
-            <span className="text-[#e8a840] text-xs animate-pulse">Simulating…</span>
-          )}
-
-          <div className="flex items-center gap-3 text-[#444] text-xs ml-1">
-            <span>drag: rotate</span>
-            <span>scroll: zoom</span>
-            <span>shift+drag: pan</span>
+        {/* Overlay controls — available in both modes */}
+        {toolpathData && (
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setShowToolpaths(v => !v)}
+              className={`px-2 py-1 text-xs border rounded transition-colors ${
+                showToolpaths
+                  ? 'bg-[#0d2a1a] border-[#1a5a2a] text-[#69f0ae]'
+                  : 'bg-[#1a1a1a] border-[#333] text-[#555]'
+              }`}
+            >
+              Paths
+            </button>
+            <button
+              onClick={() => setShowRapids(v => !v)}
+              className={`px-2 py-1 text-xs border rounded transition-colors ${
+                showRapids
+                  ? 'bg-[#2a2000] border-[#554400] text-[#ddaa22]'
+                  : 'bg-[#1a1a1a] border-[#333] text-[#555]'
+              }`}
+            >
+              Rapids
+            </button>
+            <button
+              onClick={() => setModelTransparent(v => !v)}
+              title={inMillingMode ? 'Overlay reference model as ghost' : 'Toggle model transparency'}
+              className={`px-2 py-1 text-xs border rounded transition-colors ${
+                modelTransparent
+                  ? 'bg-[#0d1a2a] border-[#1a3a5a] text-[#6b9fff]'
+                  : 'bg-[#1a1a1a] border-[#333] text-[#555]'
+              }`}
+            >
+              Ghost
+            </button>
           </div>
+        )}
+
+        {simulating && (
+          <span className="text-[#e8a840] text-xs animate-pulse">Simulating…</span>
+        )}
+
+        <div className="flex items-center gap-3 text-[#444] text-xs ml-auto">
+          <span>drag: rotate</span>
+          <span>scroll: zoom</span>
+          <span>shift+drag: pan</span>
         </div>
       </div>
 
-      {/* 3D canvas */}
+      {/* ── 3D canvas ──────────────────────────────────────────────────────── */}
       <div className="flex-1 relative min-h-0">
         <div ref={mountRef} className="absolute inset-0" />
 
-        {/* OpenSCAD render mode: no-model placeholder */}
         {!inMillingMode && !stlData && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="text-center">
@@ -343,21 +323,19 @@ export default function PreviewPanel() {
           </div>
         )}
 
-        {/* Milling mode: no-gcode placeholder */}
         {inMillingMode && !gcode && !simulating && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="text-center">
               <p className="text-[#555] text-sm">Generate G-code to simulate material removal</p>
-              <p className="text-[#333] text-xs mt-1">Stock dimensions come from the Setup tab</p>
+              <p className="text-[#333] text-xs mt-1">Set material dimensions in the Setup tab</p>
             </div>
           </div>
         )}
       </div>
 
-      {/* Timeline — only in render mode after Generate */}
-      {!inMillingMode && moveSequence && (
+      {/* ── Timeline — visible in both modes once G-code is generated ──────── */}
+      {moveSequence && (
         <div className="shrink-0 px-3 pt-2 pb-2.5 bg-[#0e0e0e] border-t border-[#2a2a2a] space-y-1.5">
-          {/* Controls row */}
           <div className="flex items-center gap-2">
             <button
               onClick={handlePlayPause}
@@ -369,8 +347,7 @@ export default function PreviewPanel() {
 
             <input
               type="range"
-              min={0}
-              max={10000}
+              min={0} max={10000}
               value={Math.round(simProgress * 10000)}
               onChange={handleScrub}
               className="flex-1 accent-[#6b9fff] cursor-pointer"
@@ -394,7 +371,6 @@ export default function PreviewPanel() {
             </div>
           </div>
 
-          {/* Position / move info row */}
           <div className="flex items-center gap-3 font-mono text-[10px]">
             {currentPos ? (
               <>
@@ -417,6 +393,7 @@ export default function PreviewPanel() {
           </div>
         </div>
       )}
+
     </div>
   )
 }

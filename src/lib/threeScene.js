@@ -45,6 +45,10 @@ export function initThreeScene(container) {
   fillLight.position.set(-60, 40, -60)
   scene.add(fillLight)
 
+  const rimLight = new THREE.DirectionalLight(0xffeedd, 0.18)
+  rimLight.position.set(40, -20, 80)
+  scene.add(rimLight)
+
   // Camera
   const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000)
   camera.position.set(80, 60, 100)
@@ -314,8 +318,8 @@ export function disposeScene(state) {
 
 // ── Stock simulation mesh ──────────────────────────────────────────────────────
 
-const _stockColor = new THREE.Color(0.72, 0.58, 0.38)  // raw-wood tan
-const _cutColor   = new THREE.Color(0.50, 0.50, 0.52)  // machined surface grey
+const _stockColor = new THREE.Color(0.74, 0.60, 0.40)  // raw-wood tan
+const _cutColor   = new THREE.Color(0.48, 0.49, 0.52)  // machined surface grey
 
 export function clearStockMesh(state) {
   if (!state.stockGroup) return
@@ -374,7 +378,7 @@ export function buildStockMesh(state, heightmap, stockX, stockY, materialThickne
   topGeo.computeVertexNormals()
 
   const topMesh = new THREE.Mesh(topGeo, new THREE.MeshStandardMaterial({
-    vertexColors: true, metalness: 0.05, roughness: 0.88, side: THREE.FrontSide,
+    vertexColors: true, metalness: 0.12, roughness: 0.72, side: THREE.FrontSide,
   }))
   topMesh.castShadow = true
   topMesh.receiveShadow = true

@@ -95,7 +95,9 @@ Each operation card shows:
 - Z-pass count and last-pass remainder
 - Enable / disable checkbox
 
-Click any operation to select it and see its toolpath highlighted in the 3D view.
+Click any operation to select it (blue highlight) and see its toolpath highlighted in the 3D view. If a timeline simulation is active, clicking an operation also jumps the timeline scrubber to the start of that operation's toolpath and scrolls the G-code panel to the matching line.
+
+While the timeline is playing or scrubbing, the operations panel shows a green **▶** indicator and left border on the operation currently being executed at the scrubber position — independently of which operation is selected for editing.
 
 ### 3 — Configure tool and machine settings
 
@@ -134,7 +136,7 @@ Use the **Post** dropdown in the header to select the output dialect:
 
 ### 5 — Generate G-code
 
-Click **Generate G-code** in the G-code panel (bottom-left). The output appears in the Monaco editor below. Click **Download** to save the `.nc` file.
+G-code is generated automatically whenever the model, operations, or settings change. The output appears in the Monaco editor in the bottom-left panel. Click **↓ Download** to save the `.nc` file.
 
 The generated code includes:
 - Header with spindle start and coordinate mode
@@ -142,6 +144,8 @@ The generated code includes:
 - Inside-out concentric passes for pockets and slots — no retract between rings at the same depth
 - Plunge moves at 30% of the cutting feedrate
 - A retract to origin safety height at the start and end of each operation
+
+**G-code / timeline sync** — the G-code panel and the timeline simulation are linked. While the timeline plays or scrubs, the G-code panel highlights the current line (blue left border) and scrolls to keep it visible. Clicking any line in the G-code panel jumps the timeline scrubber to the corresponding point in the toolpath and stops playback. Clicks on comment or header lines snap to the nearest motion line before the cursor.
 
 ---
 
@@ -183,9 +187,7 @@ The simulation reads the **Work Area X/Y** and **Material Thickness** from the S
 
 ### Timeline simulation
 
-*(Available in OpenSCAD Render mode only — hidden in Stock Simulation mode)*
-
-The toolbar below the 3D view lets you simulate the tool motion at real-world feedrates:
+The toolbar below the 3D view lets you simulate the tool motion at real-world feedrates. It is available in both 3D Model and Stock Sim modes once G-code has been generated.
 
 - **▶ / ⏸** — play / pause
 - **Speed buttons** — 0.5× · 1× · 2× · 5× · 10×
@@ -193,6 +195,16 @@ The toolbar below the 3D view lets you simulate the tool motion at real-world fe
 - **Current move indicator** — shows move type (Feed / Rapid / Plunge) and feedrate at the current position
 
 The tool head in the 3D view moves at the correct speed relative to the configured feedrate. Rapid moves are simulated at 5 000 mm/min; actual machine rapid speed may differ.
+
+**Three-way sync** — the timeline, G-code panel, and operations panel are all linked:
+
+| Action | Effect |
+|---|---|
+| Play / scrub the timeline | G-code panel scrolls to and highlights the current line; active operation shows a green indicator in the Operations list |
+| Click a line in the G-code panel | Timeline jumps to that point and stops playback |
+| Click an operation in the Operations panel | Timeline jumps to the start of that operation; G-code panel scrolls to the matching section |
+
+The operations panel maintains two independent states: the **selected** operation (blue border, shows edit controls) and the **timeline-active** operation (green ▶ border, tracks scrubber position). Editing one operation while watching another in the simulation works without interference.
 
 ---
 

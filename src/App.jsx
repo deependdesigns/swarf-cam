@@ -5,7 +5,7 @@ import CodeEditorPanel from './components/CodeEditorPanel'
 import GcodePanel from './components/GcodePanel'
 import PreviewPanel from './components/PreviewPanel'
 import RightPanel from './components/RightPanel'
-import { detectFeatures } from './lib/gcodeGenerator'
+import { detectFeatures, generateGcode, computeToolpathData, computeRapidPaths, computeMoveSequence, buildGcodeLineMap } from './lib/gcodeGenerator'
 
 const DEFAULT_SCAD = `// Jig Depth
 jigDepth = 90;
@@ -114,6 +114,8 @@ const DEFAULT_MACHINE = {
   workAreaY: 300,
   zZeroMode: 'top',
   materialThickness: 10,
+  materialWidth: 150,
+  materialLength: 150,
 }
 
 const DEFAULT_TOOL = {
@@ -151,6 +153,15 @@ export default function App() {
   const [selectedOperationId, setSelectedOperationId] = useState(null)
   const [machineSettings, setMachineSettings] = useState(() => loadStorage('swarf-machine', DEFAULT_MACHINE))
   const [globalToolSettings, setGlobalToolSettings] = useState(() => loadStorage('swarf-tool', DEFAULT_TOOL))
+  const [gcodeStatus, setGcodeStatus] = useState('idle')
+  const [gcodeError, setGcodeError] = useState(null)
+  const [simProgress, setSimProgress] = useState(0)
+  const [gcodeLineMap, setGcodeLineMap] = useState(null)
+  const [progressJumpRequest, setProgressJumpRequest] = useState(null)
+  const jumpSeqRef = useRef(0)
+  const jumpToProgress = useCallback((progress) => {
+    setProgressJumpRequest({ progress, seq: ++jumpSeqRef.current })
+  }, [])
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightCollapsed, setRightCollapsed] = useState(false)
   const [gcodeHeight, setGcodeHeight] = useState(280)
@@ -164,6 +175,31 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('swarf-tool', JSON.stringify(globalToolSettings))
   }, [globalToolSettings])
+
+  useEffect(() => {
+    if (!stlData) return
+    setGcodeStatus('generating')
+    setGcodeError(null)
+    const timer = setTimeout(() => {
+      try {
+        const newGcode = generateGcode(stlData, operations, postProcessor, globalToolSettings, machineSettings)
+        setGcode(newGcode)
+        const toolpaths = computeToolpathData(stlData, operations, globalToolSettings)
+        setToolpathData(toolpaths)
+        const safeZ = machineSettings.safetyHeight ?? 5
+        setRapidPaths(computeRapidPaths(toolpaths, safeZ))
+        const newMoveSeq = computeMoveSequence(toolpaths, safeZ)
+        setMoveSequence(newMoveSeq)
+        setGcodeLineMap(buildGcodeLineMap(newGcode, newMoveSeq))
+        setGcodeStatus('done')
+      } catch (e) {
+        setGcodeStatus('error')
+        setGcodeError(e.message)
+        setGcodeLineMap(null)
+      }
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [stlData, operations, machineSettings, globalToolSettings, postProcessor])
 
   useEffect(() => {
     function onMove(e) {
@@ -210,6 +246,10 @@ export default function App() {
       selectedOperationId, setSelectedOperationId,
       machineSettings, setMachineSettings,
       globalToolSettings, setGlobalToolSettings,
+      gcodeStatus, gcodeError,
+      simProgress, setSimProgress,
+      gcodeLineMap,
+      progressJumpRequest, jumpToProgress,
     }}>
       <div className="flex flex-col h-full bg-[#0d0d0d]">
         <Header />

@@ -1,6 +1,9 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useAppState } from '../context/AppStateContext'
 import { effectiveOp } from '../lib/gcodeGenerator'
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
+import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 
 const DIRECTIONS = [
   { id: 'climb', label: 'Climb' },
@@ -20,14 +23,87 @@ function swatchStyle(color) {
   return { background: color ? `#${color.toString(16).padStart(6, '0')}` : '#6b9fff' }
 }
 
+function SortableOpItem({ op, selectedOperationId, setSelectedOperationId, setEditingId, globalToolSettings, toggleEnabled, isActiveInTimeline, onJumpToProgress }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: op.id })
+  const eop = effectiveOp(op, globalToolSettings)
+  const disabled = op.enabled === false
+
+  function handleClick() {
+    setSelectedOperationId(op.id)
+    setEditingId(null)
+    if (onJumpToProgress) onJumpToProgress()
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }}
+      onClick={handleClick}
+      className={`flex items-center justify-between px-2 py-2 cursor-pointer transition-colors ${
+        op.id === selectedOperationId
+          ? 'bg-[#1a2a3a] border-l-2 border-[#6b9fff]'
+          : isActiveInTimeline
+            ? 'bg-[#0d1a0d] border-l-2 border-[#69f0ae]'
+            : 'hover:bg-[#181818] border-l-2 border-transparent'
+      } ${disabled ? 'opacity-40' : ''}`}
+    >
+      {/* Grip handle */}
+      <span
+        {...attributes}
+        {...listeners}
+        className="text-[#333] hover:text-[#555] cursor-grab active:cursor-grabbing shrink-0 mr-1 select-none"
+        onClick={e => e.stopPropagation()}
+      >
+        ⠿
+      </span>
+
+      <div className="flex items-center gap-2 min-w-0 flex-1">
+        {/* Enable toggle */}
+        <input
+          type="checkbox"
+          checked={!disabled}
+          onChange={e => { e.stopPropagation(); toggleEnabled(op.id) }}
+          onClick={e => e.stopPropagation()}
+          className="shrink-0 accent-[#6b9fff] cursor-pointer"
+        />
+        <div className="w-2 h-2 rounded-full shrink-0" style={swatchStyle(op.color)} />
+        <div className="min-w-0 flex-1">
+          <span className="text-[#c8c8c8] text-xs block truncate">{op.label}</span>
+          <span className="text-[#555] text-xs">
+            {op.type} · ⌀{eop.toolDiameter}mm
+            {op.detectedDepth != null && ` · ${op.detectedDepth.toFixed(1)}mm`}
+          </span>
+        </div>
+        {isActiveInTimeline && (
+          <span className="text-[#69f0ae] text-[9px] shrink-0 ml-1" title="Timeline position">▶</span>
+        )}
+      </div>
+      {Object.keys(op.overrides ?? {}).length > 0 && (
+        <span className="text-[#6b9fff] text-xs shrink-0 ml-1" title="Has overrides">✦</span>
+      )}
+    </div>
+  )
+}
+
 export default function OperationsPanel() {
   const {
     operations, setOperations,
     selectedOperationId, setSelectedOperationId,
     globalToolSettings,
+    simProgress, moveSequence, jumpToProgress,
   } = useAppState()
 
   const [editingId, setEditingId] = useState(null)
+
+  // Derive which operation is currently under the timeline scrubber
+  const activeFromTimeline = useMemo(() => {
+    if (!moveSequence?.opRanges?.length || !moveSequence.totalLength) return null
+    const dist = simProgress * moveSequence.totalLength
+    const range = moveSequence.opRanges.find(r => dist >= r.startDist && dist <= r.endDist)
+    return range?.operationId ?? null
+  }, [simProgress, moveSequence])
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   const selected = operations.find(op => op.id === selectedOperationId)
 
@@ -69,6 +145,15 @@ export default function OperationsPanel() {
     )
   }
 
+  function handleDragEnd({ active, over }) {
+    if (!over || active.id === over.id) return
+    setOperations(ops => {
+      const oldIndex = ops.findIndex(op => op.id === active.id)
+      const newIndex = ops.findIndex(op => op.id === over.id)
+      return arrayMove(ops, oldIndex, newIndex)
+    })
+  }
+
   const isEditing = editingId === selectedOperationId
 
   return (
@@ -79,43 +164,28 @@ export default function OperationsPanel() {
 
       {/* Operation list */}
       <div className="border-b border-[#2a2a2a] overflow-y-auto max-h-[45%] shrink-0">
-        {operations.map(op => {
-          const eop = effectiveOp(op, globalToolSettings)
-          const disabled = op.enabled === false
-          return (
-            <div
-              key={op.id}
-              onClick={() => { setSelectedOperationId(op.id); setEditingId(null) }}
-              className={`flex items-center justify-between px-3 py-2 cursor-pointer transition-colors ${
-                op.id === selectedOperationId
-                  ? 'bg-[#1a2a3a] border-l-2 border-[#6b9fff]'
-                  : 'hover:bg-[#181818] border-l-2 border-transparent'
-              } ${disabled ? 'opacity-40' : ''}`}
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                {/* Enable toggle */}
-                <input
-                  type="checkbox"
-                  checked={!disabled}
-                  onChange={e => { e.stopPropagation(); toggleEnabled(op.id) }}
-                  onClick={e => e.stopPropagation()}
-                  className="shrink-0 accent-[#6b9fff] cursor-pointer"
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={operations.map(op => op.id)} strategy={verticalListSortingStrategy}>
+            {operations.map(op => {
+              const range = moveSequence?.opRanges?.find(r => r.operationId === op.id)
+              return (
+                <SortableOpItem
+                  key={op.id}
+                  op={op}
+                  selectedOperationId={selectedOperationId}
+                  setSelectedOperationId={setSelectedOperationId}
+                  setEditingId={setEditingId}
+                  globalToolSettings={globalToolSettings}
+                  toggleEnabled={toggleEnabled}
+                  isActiveInTimeline={op.id === activeFromTimeline}
+                  onJumpToProgress={range && moveSequence?.totalLength > 0
+                    ? () => jumpToProgress(range.startDist / moveSequence.totalLength)
+                    : null}
                 />
-                <div className="w-2 h-2 rounded-full shrink-0" style={swatchStyle(op.color)} />
-                <div className="min-w-0">
-                  <span className="text-[#c8c8c8] text-xs block truncate">{op.label}</span>
-                  <span className="text-[#555] text-xs">
-                    {op.type} · ⌀{eop.toolDiameter}mm
-                    {op.detectedDepth != null && ` · ${op.detectedDepth.toFixed(1)}mm`}
-                  </span>
-                </div>
-              </div>
-              {Object.keys(op.overrides ?? {}).length > 0 && (
-                <span className="text-[#6b9fff] text-xs shrink-0 ml-1" title="Has overrides">✦</span>
-              )}
-            </div>
-          )
-        })}
+              )
+            })}
+          </SortableContext>
+        </DndContext>
         {operations.length === 0 && (
           <p className="text-[#444] text-xs px-3 py-4 text-center">
             Compile a model to detect operations.
