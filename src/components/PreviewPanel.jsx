@@ -43,7 +43,10 @@ export default function PreviewPanel() {
   // Handle jump requests from GcodePanel / OperationsPanel
   useEffect(() => {
     if (!progressJumpRequest) return
+    // Subscribing to an external command object (bumped seq from GcodePanel/OperationsPanel)
+    // and syncing local playback state in response — the documented effect+setState pattern.
     isPlayingRef.current = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsPlaying(false)
     cancelAnimationFrame(animRafRef.current)
     const p = Math.max(0, Math.min(1, progressJumpRequest.progress))
@@ -135,11 +138,16 @@ export default function PreviewPanel() {
 
   // ── Milling simulation ───────────────────────────────────────────────────────
   useEffect(() => {
-    if (previewMode !== 'milling') { setSimulating(false); return }
+    // Badge visibility is gated on previewMode too (see JSX below), so no state reset
+    // is needed here when leaving milling mode.
+    if (previewMode !== 'milling') return
 
     const matW = machineSettings.materialWidth  ?? 150
     const matL = machineSettings.materialLength ?? 150
 
+    // Immediate "simulating" cue while the setTimeout-deferred work below runs — the actual
+    // heightmap result lands asynchronously, so this can't be derived at render time.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSimulating(true)
     const id = setTimeout(() => {
       const moves  = parseGcode(gcode)
@@ -175,6 +183,9 @@ export default function PreviewPanel() {
   }, [previewMode, heightmap, machineSettings.materialWidth, machineSettings.materialLength, machineSettings.materialThickness])
 
   // ── Animation loop ───────────────────────────────────────────────────────────
+  // runAnimFrameRef holds the latest closure so the recursive rAF call below doesn't
+  // self-reference the const being initialized (also plays nicer with the React Compiler).
+  const runAnimFrameRef = useRef(null)
   const runAnimFrame = useCallback((timestamp) => {
     if (!isPlayingRef.current) { lastTimeRef.current = null; return }
 
@@ -199,8 +210,11 @@ export default function PreviewPanel() {
     }
 
     lastTimeRef.current = timestamp
-    animRafRef.current = requestAnimationFrame(runAnimFrame)
+    animRafRef.current = requestAnimationFrame(runAnimFrameRef.current)
   }, [])
+  // runAnimFrame is referentially stable (deps: []), so this effect only ever runs once —
+  // it's not a per-render sync, just the one-time handoff refs need instead of self-reference.
+  useEffect(() => { runAnimFrameRef.current = runAnimFrame }, [runAnimFrame])
 
   function handlePlayPause() {
     const next = !isPlayingRef.current
@@ -301,7 +315,7 @@ export default function PreviewPanel() {
           </div>
         )}
 
-        {simulating && (
+        {simulating && inMillingMode && (
           <span className="text-[#e8a840] text-xs animate-pulse">Simulating…</span>
         )}
 

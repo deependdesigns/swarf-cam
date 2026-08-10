@@ -2,9 +2,10 @@ import { getPostProcessor } from './postProcessors/index'
 import {
   extractSliceContours, getStlTopZ, getFeatureDepths,
   getFloorZLevels, getRegionFloorDepth,
-  polygonArea, polygonCentroid,
+  polygonArea, polygonCentroid, pointInPolygon,
+  classifyContours, buildContourHierarchy, sliceAllLayers, getStlBounds,
 } from './stlSlicer'
-import { offsetContours } from './toolpathOffsets'
+import { offsetContours, unionContours, clipContours } from './toolpathOffsets'
 
 const OP_COLORS = [0x00e5ff, 0xffab40, 0x69f0ae, 0xff4081, 0xea80fc, 0xffd740, 0x40c4ff, 0xe040fb]
 
@@ -24,29 +25,6 @@ export function effectiveOp(op, globalTool) {
 }
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
-
-function classifyContours(contours) {
-  // Count how many other contours contain each contour's first point.
-  // Even depth = solid boundary (outer), odd depth = void boundary (inner/hole to machine).
-  // This correctly handles islands/bosses inside pockets (depth 2 = outer, not a hole).
-  const n = contours.length
-  const nestingDepth = new Array(n).fill(0)
-  for (let i = 0; i < n; i++) {
-    const [px, py] = contours[i][0]
-    for (let j = 0; j < n; j++) {
-      if (i === j) continue
-      let inside = false
-      const poly = contours[j]
-      for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) {
-        const [xi, yi] = poly[a], [xj, yj] = poly[b]
-        if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
-          inside = !inside
-      }
-      if (inside) nestingDepth[i]++
-    }
-  }
-  return nestingDepth.map(d => d % 2 === 0)
-}
 
 function circleFromContour(polygon) {
   const [cx, cy] = polygonCentroid(polygon)
@@ -194,9 +172,20 @@ function detectEdgePocketsFromContour(contour, stlArrayBuffer, topZ, sliceZ, too
 
 // targetRadius: when set, concentric contours (same centroid) are disambiguated by
 // how closely their average radius matches the expected feature size.
-function findContourForCentroid(contours, [tx, ty], targetRadius = null) {
-  let bestCi = 0, bestScore = Infinity
-  for (let ci = 0; ci < contours.length; ci++) {
+// isOuterArr/wantOuter: when both given, candidates are filtered to isOuterArr[ci] === wantOuter
+// BEFORE distance-scoring. Without this, a pocket with a concentric central island has a void
+// centroid that nearly coincides with the island's centroid, and pure distance-scoring can pick
+// the island contour instead — the caller's later `if (isOuter[ci]) continue` then silently
+// drops the entire op instance instead of producing a toolpath. Falls back to unfiltered search
+// if no candidate matches the wanted parity (defensive — keeps old behavior over crashing).
+function findContourForCentroid(contours, [tx, ty], targetRadius = null, isOuterArr = null, wantOuter = null) {
+  const candidates = isOuterArr && wantOuter !== null
+    ? contours.map((_, i) => i).filter(ci => isOuterArr[ci] === wantOuter)
+    : contours.map((_, i) => i)
+  const pool = candidates.length > 0 ? candidates : contours.map((_, i) => i)
+
+  let bestCi = pool[0] ?? 0, bestScore = Infinity
+  for (const ci of pool) {
     const [cx, cy] = polygonCentroid(contours[ci])
     const centDist = Math.hypot(cx - tx, cy - ty)
     let score = centDist
@@ -210,14 +199,15 @@ function findContourForCentroid(contours, [tx, ty], targetRadius = null) {
 }
 
 function findContoursForOp(contours, isOuter, op) {
+  const wantOuter = op.type === 'profile'
   if (op.centroids) {
     const seen = new Set()
     const targetRadius = op.detectedDiameter != null ? op.detectedDiameter / 2 : null
     return op.centroids
-      .map(c => findContourForCentroid(contours, c, targetRadius))
+      .map(c => findContourForCentroid(contours, c, targetRadius, isOuter, wantOuter))
       .filter(ci => { if (seen.has(ci)) return false; seen.add(ci); return true })
   }
-  if (op.centroid) return [findContourForCentroid(contours, op.centroid)]
+  if (op.centroid) return [findContourForCentroid(contours, op.centroid, null, isOuter, wantOuter)]
   return contours.map((_, i) => i).filter(ci =>
     op.type === 'profile' ? isOuter[ci] : !isOuter[ci]
   )
@@ -225,14 +215,30 @@ function findContoursForOp(contours, isOuter, op) {
 
 // ── Toolpath generators ───────────────────────────────────────────────────────
 
-function generatePocketPasses(contour, toolRadius, stepoverPct) {
+// Contours j whose immediate parent (tightest enclosing contour) is contour ci and which
+// are themselves solid ("outer") — i.e. islands/bosses standing up inside pocket ci.
+export function findIslandsForContour(hierarchy, contours, ci) {
+  return contours.filter((_, j) => hierarchy.parent[j] === ci && hierarchy.isOuter[j])
+}
+
+// mask: optional polygon array — only machine the contour area NOT already cleared.
+// If mask fully covers contour, returns [] so callers skip the operation entirely.
+// islands: optional polygon array — solid bosses inside the pocket the tool must avoid.
+// Each inward ring is clipped against a fixed toolRadius keepout around the islands so every
+// pass keeps the same standoff, rather than re-offsetting the islands themselves on every
+// pass (which would grow the keepout by `dist` each iteration and under-clear the pocket).
+export function generatePocketPasses(contour, toolRadius, stepoverPct, mask = null, islands = null) {
   const stepover = Math.max(toolRadius * (stepoverPct / 100), 0.01)
+  const toMachine = mask?.length > 0 ? clipContours([contour], mask) : [contour]
+  if (toMachine.length === 0) return []
+  const expandedIslands = islands?.length > 0 ? offsetContours(islands, toolRadius) : null
   const inward = []
   for (let dist = toolRadius; ; dist += stepover) {
-    const ocs = offsetContours([contour], -dist)
+    let ocs = offsetContours(toMachine, -dist)
     if (ocs.length === 0) break
     if (ocs.reduce((s, c) => s + polygonArea(c), 0) < 0.5) break
-    inward.push(ocs)
+    if (expandedIslands?.length > 0) ocs = clipContours(ocs, expandedIslands)
+    if (ocs.length > 0) inward.push(ocs)
   }
   inward.reverse()
   return inward.flat()
@@ -244,6 +250,7 @@ function applyDirection(paths, direction) {
   if (direction !== 'conventional') return paths
   return paths.map(p => p.length > 1 ? [p[0], ...p.slice(1).reverse()] : p)
 }
+
 
 // Build a closed virtual polygon for a slot. Extended by toolR in the open direction(s)
 // so that the first inward pocket offset (at toolR) lands exactly at the wall/opening boundary.
@@ -481,7 +488,7 @@ export function detectFeatures(stlArrayBuffer, toolDiameter = 3.175) {
     const contours = extractSliceContours(stlArrayBuffer, sliceZ)
     if (contours.length === 0) continue
     const isOuter = classifyContours(contours)
-    const featureDepths = getFeatureDepths(stlArrayBuffer, topZ, contours)
+    const featureDepths = getFeatureDepths(stlArrayBuffer, topZ, contours, sliceZ)
 
     // Edge pocket detection: concave circular arcs in outer contours
     for (let ci = 0; ci < contours.length; ci++) {
@@ -563,6 +570,442 @@ export function detectFeatures(stlArrayBuffer, toolDiameter = 3.175) {
   return ops
 }
 
+// ── Volumetric feature tracking (per-feature Z-continuity) ──────────────────
+
+const CENTROID_TOL = 2.0     // mm: max centroid drift to consider the same feature
+const AREA_DIFF_RATIO = 0.05 // 5%: max relative area change within one tier of a feature
+
+// Track each physical void feature independently through the Z-stack via nearest-centroid
+// matching, instead of comparing whole layers as one atomic unit. This is what lets an
+// unrelated feature's shape change (e.g. a hex bolt head transitioning to a round thread hole)
+// avoid corrupting a completely different, unchanged hole's depth elsewhere in the model.
+//
+// Per layer, handles:
+//  - continuation: same feature, area within tolerance → track extends
+//  - tier split: same XY, area beyond tolerance (counterbore → thread hole) → close this tier,
+//    open a new one
+//  - merge: a track's (pre-merge) centroid gets swallowed by a larger contour (e.g. a slot
+//    crossing a pocket) → track stays open against the merged blob, but keeps tracking its
+//    pre-merge centroid/area as its true identity. Plain nearest-centroid matching on the next
+//    layer then naturally re-finds it the moment the blob demerges — no separate "resume" path
+//    needed.
+//  - one-layer grace gap: a track with zero match for exactly one layer (slicing noise near a
+//    floor) is not immediately closed.
+//
+// Known residual limitation: if ONE track's own void splits into two-or-more separate voids in
+// a single step (e.g. a wide pocket floor revealing two disconnected deeper features), only the
+// nearest child inherits the parent's history; sibling children start fresh tracks. This
+// under-states their startDepth (skips less material, never more) rather than risking a gouge.
+//
+// Returns a flat array of { zTop, zBottom, contour, centroid, area }, one per contiguous
+// single-tier run of one physical feature.
+export function trackFeaturesAcrossLayers(layerStack) {
+  const closed = []
+  let open = []
+
+  const closeTrack = (t, zBottom) => {
+    const clean = t.run.filter(r => !r.merged)
+    const pick = clean.length > 0 ? clean : t.run
+    const mid = pick[Math.floor(pick.length / 2)]
+    closed.push({ zTop: t.zTop, zBottom, contour: mid.contour, centroid: t.centroid, area: t.area })
+  }
+
+  for (const layer of layerStack) {
+    const info = layer.voidContours.map(c => ({ c, centroid: polygonCentroid(c), area: polygonArea(c) }))
+
+    // Globally-sorted greedy matching: candidate (track, contour) pairs within centroid
+    // tolerance, assigned nearest-first across the whole layer — not per-track in array order,
+    // which can mis-pair closely spaced duplicate features (e.g. 3 identical bolt holes) when
+    // Clipper doesn't return contours in a stable order between independent layer slices.
+    const pairs = []
+    for (let ti = 0; ti < open.length; ti++) {
+      for (let ci = 0; ci < info.length; ci++) {
+        const d = Math.hypot(open[ti].centroid[0] - info[ci].centroid[0], open[ti].centroid[1] - info[ci].centroid[1])
+        if (d <= CENTROID_TOL) pairs.push({ ti, ci, d })
+      }
+    }
+    pairs.sort((a, b) => a.d - b.d)
+
+    const matchedTrack = new Set()
+    const claimedContour = new Set()
+    const nextOpen = new Array(open.length).fill(null)
+
+    for (const { ti, ci } of pairs) {
+      if (matchedTrack.has(ti) || claimedContour.has(ci)) continue
+      matchedTrack.add(ti); claimedContour.add(ci)
+      const t = open[ti]
+      const { c, centroid, area } = info[ci]
+      const avg = (area + t.area) / 2
+      const areaOk = avg === 0 || Math.abs(area - t.area) / avg <= AREA_DIFF_RATIO
+      if (areaOk) {
+        t.run.push({ z: layer.z, contour: c, merged: false })
+        nextOpen[ti] = { zTop: t.zTop, centroid, area, run: t.run, lastZ: layer.z, missed: 0 }
+      } else {
+        // Tier split: same feature, real diameter/shape change (e.g. counterbore → thread hole)
+        closeTrack(t, t.lastZ)
+        nextOpen[ti] = { zTop: layer.z, centroid, area, run: [{ z: layer.z, contour: c, merged: false }], lastZ: layer.z, missed: 0 }
+      }
+    }
+
+    // Merge fallback: unmatched open tracks whose (pre-merge) centroid now lies inside a
+    // MEANINGFULLY LARGER contour (e.g. a slot crossing this pocket). Multiple tracks may
+    // share one host. The size requirement matters: polygonCentroid is a plain vertex average,
+    // not area-weighted, so two differently-tessellated contours at the same true location can
+    // drift past CENTROID_TOL on tessellation noise alone — plain containment would then treat
+    // an unrelated same-or-smaller feature nearby as a false "merge" instead of correctly
+    // closing this track and letting the other feature start its own.
+    for (let ti = 0; ti < open.length; ti++) {
+      if (matchedTrack.has(ti)) continue
+      const t = open[ti]
+      const hostIdx = info.findIndex(x =>
+        x.area > t.area * (1 + AREA_DIFF_RATIO) && pointInPolygon(t.centroid[0], t.centroid[1], x.c)
+      )
+      if (hostIdx !== -1) {
+        claimedContour.add(hostIdx)
+        t.run.push({ z: layer.z, contour: info[hostIdx].c, merged: true })
+        // lastZ advances through the merge (this XY position is still void and needs
+        // clearing) even though centroid/area stay frozen at pre-merge values for
+        // re-matching. Otherwise a merge that never demerges before the stack ends would
+        // silently drop machining coverage for the rest of that feature's depth.
+        nextOpen[ti] = { zTop: t.zTop, centroid: t.centroid, area: t.area, run: t.run, lastZ: layer.z, missed: 0 }
+      } else if (t.missed < 1) {
+        nextOpen[ti] = { ...t, missed: t.missed + 1 }
+      } else {
+        closeTrack(t, t.lastZ)
+        nextOpen[ti] = null
+      }
+    }
+
+    // Genuinely new contours (unclaimed by continuation, tier split, or merge) start new tracks.
+    for (let ci = 0; ci < info.length; ci++) {
+      if (claimedContour.has(ci)) continue
+      nextOpen.push({
+        zTop: layer.z, centroid: info[ci].centroid, area: info[ci].area,
+        run: [{ z: layer.z, contour: info[ci].c, merged: false }], lastZ: layer.z, missed: 0,
+      })
+    }
+
+    open = nextOpen.filter(Boolean)
+  }
+
+  for (const t of open) closeTrack(t, t.lastZ)
+
+  return closed
+}
+
+// ── Prior-material mask computation (Step 4) ─────────────────────────────────
+
+// Returns a representative 2-D polygon for op (for coverage / containment tests).
+function getOpRepresentativeContour(op, stlArrayBuffer, topZ) {
+  if (op.detectedDiameter != null) {
+    const [cx, cy] = op.centroids?.[0] ?? op.centroid ?? [0, 0]
+    return makeCircleContour(cx, cy, op.detectedDiameter / 2)
+  }
+  if ((op.type === 'pocket' || op.type === 'drill') && op.centroids?.length) {
+    const sz = op.detectionSliceZ ?? topZ - 0.01
+    const sc = extractSliceContours(stlArrayBuffer, sz)
+    if (sc.length === 0) return null
+    const ci = findContourForCentroid(sc, op.centroids[0])
+    return sc[ci] ?? null
+  }
+  if (op.type === 'edge-pocket' && op.edgeCenter) {
+    return makeCircleContour(op.edgeCenter[0], op.edgeCenter[1], op.edgeRadius)
+  }
+  if (op.type === 'slot' && op.slotBounds) {
+    const s = op.slotBounds
+    if (s.direction === 'cross') {
+      // Build the actual 12-vertex cross polygon so containment tests don't
+      // treat the entire stock face as "cleared" by the slot.
+      const { wallXMin: wxl, wallXMax: wxr, wallYMin: wyl, wallYMax: wyr,
+              openXMin: oxl, openXMax: oxr, openYMin: oyl, openYMax: oyr } = s
+      return [
+        [oxl, wyr], [wxl, wyr], [wxl, oyr], [wxr, oyr],
+        [wxr, wyr], [oxr, wyr], [oxr, wyl], [wxr, wyl],
+        [wxr, oyl], [wxl, oyl], [wxl, wyl], [oxl, wyl],
+      ]
+    }
+    const x1 = s.openXMin ?? s.wallXMin, x2 = s.openXMax ?? s.wallXMax
+    const y1 = s.openYMin ?? s.wallYMin, y2 = s.openYMax ?? s.wallYMax
+    return [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
+  }
+  return null
+}
+
+// For each pocket/drill in sorted order, compute:
+//   priorClearDepth: max depth of any prior op that covers this op's centroid AND
+//                   is SHALLOWER than this op.  Used as startDepth to skip Z passes
+//                   that prior ops already cleared.
+//   priorMaterialMask: clipper union of prior op contours that cover this op's centroid
+//                      AND are the SAME OR DEEPER depth.  Used to clip the XY toolpath
+//                      so passes don't re-cut already-cleared area at the same depth tier.
+function computePriorMasks(ops, stlArrayBuffer, topZ) {
+  const contourCache = ops.map(op => getOpRepresentativeContour(op, stlArrayBuffer, topZ))
+
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i]
+    if (op.type !== 'pocket' && op.type !== 'drill') continue
+
+    const [cx, cy] = op.centroids?.[0] ?? op.centroid ?? [null, null]
+    if (cx == null) continue
+
+    let priorClearDepth = 0
+    const sameDepthMaskContours = []
+
+    for (let j = 0; j < i; j++) {
+      const prior = ops[j]
+      // Slots and open-contours are open shapes — their footprint may only
+      // partially cover a pocket's area, so they must not trigger a full Z-skip.
+      if (prior.type === 'profile' || prior.type === 'slot' || prior.type === 'open-contour') continue
+      const priorContour = contourCache[j]
+      if (!priorContour) continue
+      if (!pointInPolygon(cx, cy, priorContour)) continue
+
+      if (prior.detectedDepth < op.detectedDepth - 0.1) {
+        // Prior is shallower: it cleared this centroid's area from depth 0 → prior.detectedDepth.
+        priorClearDepth = Math.max(priorClearDepth, prior.detectedDepth)
+      } else {
+        // Prior is same depth or deeper: its XY footprint is already fully cleared.
+        sameDepthMaskContours.push(priorContour)
+      }
+    }
+
+    if (priorClearDepth > 0) op.priorClearDepth = priorClearDepth
+    if (sameDepthMaskContours.length > 0) {
+      op.priorMaterialMask = sameDepthMaskContours.length === 1
+        ? sameDepthMaskContours
+        : unionContours(sameDepthMaskContours)
+    }
+  }
+}
+
+// ── analyzeVolume: volume-aware feature detection ─────────────────────────────
+
+export function analyzeVolume(stlArrayBuffer, toolDiameter = 3.175, stockBoundsOverride = null) {
+  if (!stlArrayBuffer) return []
+
+  const topZ = getStlTopZ(stlArrayBuffer)
+  const bounds = stockBoundsOverride ?? getStlBounds(stlArrayBuffer)
+  const ops = []
+  let colorIdx = 0
+
+  // ── 1. Outer profiles from bottom-slice outer contours ──────────────────────
+  const bottomContours = extractSliceContours(stlArrayBuffer, 0.01)
+  if (bottomContours.length > 0) {
+    const bottomIsOuter = classifyContours(bottomContours)
+    const bottomAreas = bottomContours.map(polygonArea)
+    bottomContours
+      .map((_, i) => i)
+      .filter(i => bottomIsOuter[i])
+      .sort((a, b) => bottomAreas[b] - bottomAreas[a])
+      .forEach(ci => {
+        const [cx, cy] = polygonCentroid(bottomContours[ci])
+        ops.push({
+          type: 'profile',
+          label: `Profile Cut ${ops.filter(o => o.type === 'profile').length + 1}`,
+          centroid: [cx, cy],
+          detectedDepth: topZ,
+          detectedCount: 1,
+          color: OP_COLORS[colorIdx++ % OP_COLORS.length],
+          enabled: true,
+          overrides: {},
+        })
+      })
+  }
+
+  // ── 2. Edge-pockets + open slots from top-surface outer contours ─────────────
+  const sliceZTop = topZ - 0.01
+  const topContours = extractSliceContours(stlArrayBuffer, sliceZTop)
+  if (topContours.length > 0) {
+    const topIsOuter = classifyContours(topContours)
+    const topOuters = topContours.filter((_, i) => topIsOuter[i])
+
+    // Edge pockets (concave arcs on outer perimeter)
+    const edgePocketKnown = []
+    for (let ci = 0; ci < topContours.length; ci++) {
+      if (!topIsOuter[ci]) continue
+      for (const ep of detectEdgePocketsFromContour(topContours[ci], stlArrayBuffer, topZ, sliceZTop, toolDiameter)) {
+        if (edgePocketKnown.some(k => Math.hypot(k.cx-ep.cx, k.cy-ep.cy) < 2 && Math.abs(k.r-ep.r) < 1)) continue
+        edgePocketKnown.push(ep)
+        ops.push({
+          type: 'edge-pocket',
+          label: `Edge Pocket ⌀${(ep.r*2).toFixed(1)}mm`,
+          edgeCenter: [ep.cx, ep.cy],
+          edgeRadius: ep.r,
+          detectedDepth: ep.depth,
+          detectionSliceZ: sliceZTop,
+          detectedCount: 1,
+          color: OP_COLORS[colorIdx++ % OP_COLORS.length],
+          enabled: true,
+          overrides: {},
+        })
+      }
+    }
+
+    // Open slots (gaps between outer contour pieces — handles through-slots that produce
+    // no inner void contours because they are open on two or more sides)
+    for (const slot of detectOpenSlots(topOuters, stlArrayBuffer, topZ)) {
+      let label
+      if (slot.direction === 'cross') label = 'Cross Slot'
+      else if (slot.direction === 'x') label = `Slot ${(slot.wallXMax - slot.wallXMin).toFixed(1)}mm`
+      else label = `Slot ${(slot.wallYMax - slot.wallYMin).toFixed(1)}mm`
+      ops.push({
+        type: 'slot',
+        label,
+        slotBounds: slot,
+        detectedDepth: slot.depth,
+        detectedArea: (slot.wallXMax - slot.wallXMin) * (slot.wallYMax - slot.wallYMin),
+        detectedCount: 1,
+        color: OP_COLORS[colorIdx++ % OP_COLORS.length],
+        enabled: true,
+        overrides: {},
+      })
+    }
+  }
+
+  // ── 3. Region-based void detection ─────────────────────────────────────────────
+  // Slice the STL and track each physical void feature independently through Z
+  // (see trackFeaturesAcrossLayers) so one feature's depth is never corrupted by an
+  // unrelated feature elsewhere in the model changing shape at a nearby Z.
+  const zStep = 0.5
+  const layerStack = sliceAllLayers(stlArrayBuffer, zStep)
+  const tracks = trackFeaturesAcrossLayers(layerStack)
+
+  // Coarse key (type + diameter/area) → candidate cluster list. startDepth/depth are NOT
+  // baked into the key directly: two independently-tracked duplicate features (e.g. 3
+  // identical bolt holes) can have their zTop/zBottom land on layer indices that differ by a
+  // fraction of zStep, which would round to different buckets and wrongly split one duplicate
+  // group into two op cards. Instead cluster within tolerance below.
+  const coarseGroups = new Map()
+
+  for (const track of tracks) {
+    const area = polygonArea(track.contour)
+    if (area < 0.5) continue
+    const { cx, cy, r } = circleFromContour(track.contour)
+    const diameter = r * 2
+    const roundness = area / (Math.PI * r * r)
+    const bbox = getBbox(track.contour)
+
+    const depth = topZ - track.zBottom
+    // startDepth: depth already cleared before this track's own tier opens. 0 for features
+    // accessible from the top surface; nonzero only for a genuinely nested/stepped tier
+    // (e.g. the narrow bore beneath a counterbore starts at counterbore depth) — the track's
+    // own zTop already reflects that directly, no cross-checking against neighbors needed.
+    const startDepth = Math.max(0, topZ - track.zTop - zStep / 2)
+    const detectionSliceZ = Math.max((track.zTop + track.zBottom) / 2, 0.01)
+
+    const EPS = 1.5
+    const touchesBoundary =
+      bbox.xMin <= bounds.xMin + EPS || bbox.xMax >= bounds.xMax - EPS ||
+      bbox.yMin <= bounds.yMin + EPS || bbox.yMax >= bounds.yMax - EPS
+
+    // Too small for safe open-contour profiling — risk of leaving loose material
+    const minDim = Math.min(bbox.xMax - bbox.xMin, bbox.yMax - bbox.yMin)
+    const tooSmallForOpenContour = minDim < toolDiameter * 3
+
+    let type, label, coarseKey
+
+    if (roundness > 0.7 && diameter <= toolDiameter * 1.05) {
+      type = 'drill'
+      const roundDia = Math.round(diameter * 4) / 4
+      label = `Drill ⌀${diameter.toFixed(1)}mm`
+      coarseKey = `drill|d${roundDia}`
+    } else if (touchesBoundary && !tooSmallForOpenContour) {
+      type = 'open-contour'
+      label = `Open Contour ${area.toFixed(0)}mm²`
+      coarseKey = `open|a${Math.round(area / 50) * 50}|${Math.round(cx)}|${Math.round(cy)}`
+    } else {
+      type = 'pocket'
+      label = roundness > 0.7
+        ? `Pocket ⌀${diameter.toFixed(1)}mm`
+        : `Pocket ${area.toFixed(0)}mm²`
+      const roundDia = Math.round(diameter * 4) / 4
+      coarseKey = roundness > 0.7 ? `pocket|d${roundDia}` : `pocket|a${Math.round(area / 50) * 50}`
+    }
+
+    if (!coarseGroups.has(coarseKey)) coarseGroups.set(coarseKey, [])
+    coarseGroups.get(coarseKey).push({
+      type, label, depth, startDepth, cx, cy, detectionSliceZ,
+      diameter: roundness > 0.7 ? diameter : 0, area,
+    })
+  }
+
+  // Within each coarse group, cluster by (depth, startDepth) within one zStep of tolerance so
+  // duplicate features with independently-tracked but functionally-identical Z ranges still
+  // collapse into one editable op card instead of fragmenting on sub-zStep jitter.
+  const groups = new Map()
+  let clusterSeq = 0
+  for (const entries of coarseGroups.values()) {
+    const clusters = [] // { depth, startDepth, members: [entry] }
+    for (const e of entries) {
+      const cluster = clusters.find(c =>
+        Math.abs(c.depth - e.depth) <= zStep && Math.abs(c.startDepth - e.startDepth) <= zStep
+      )
+      if (cluster) cluster.members.push(e)
+      else clusters.push({ depth: e.depth, startDepth: e.startDepth, members: [e] })
+    }
+    for (const cluster of clusters) {
+      const key = `cluster${clusterSeq++}`
+      const first = cluster.members[0]
+      groups.set(key, {
+        type: first.type, label: first.label,
+        depth: cluster.depth, startDepth: cluster.startDepth,
+        area: first.area, diameter: first.diameter,
+        centroids: [], centroidSliceZs: [],
+        detectionSliceZ: first.detectionSliceZ,
+        colorIdx: colorIdx++,
+      })
+      const g = groups.get(key)
+      for (const m of cluster.members) {
+        g.centroids.push([m.cx, m.cy])
+        g.centroidSliceZs.push(m.detectionSliceZ)
+      }
+    }
+  }
+
+  for (const g of groups.values()) {
+    const count = g.centroids.length
+    ops.push({
+      type: g.type,
+      label: count > 1 ? `${g.label} ×${count}` : g.label,
+      centroids: g.centroids,
+      centroidSliceZs: g.centroidSliceZs,
+      detectionSliceZ: g.detectionSliceZ,
+      detectedDepth: g.depth,
+      startDepth: g.startDepth > 0.1 ? g.startDepth : undefined,
+      detectedArea: g.area,
+      detectedCount: count,
+      detectedDiameter: g.diameter > 0 ? g.diameter : undefined,
+      color: OP_COLORS[g.colorIdx % OP_COLORS.length],
+      enabled: true,
+      overrides: {},
+    })
+  }
+
+  // ── Step 5: Sort — profiles last, drills before profiles, shallower first,
+  //            larger area first within the same depth tier. ──────────────────
+  ops.sort((a, b) => {
+    if (a.type === 'profile'      && b.type !== 'profile')      return 1
+    if (b.type === 'profile'      && a.type !== 'profile')      return -1
+    if (a.type === 'drill'        && b.type !== 'drill')        return 1
+    if (b.type === 'drill'        && a.type !== 'drill')        return -1
+    if (a.type === 'open-contour' && b.type !== 'open-contour') return 1
+    if (b.type === 'open-contour' && a.type !== 'open-contour') return -1
+    const dDiff = a.detectedDepth - b.detectedDepth
+    if (Math.abs(dDiff) > 0.1) return dDiff
+    const aA = a.detectedArea ?? (a.detectedDiameter ? Math.PI * (a.detectedDiameter/2)**2 : 0)
+    const aB = b.detectedArea ?? (b.detectedDiameter ? Math.PI * (b.detectedDiameter/2)**2 : 0)
+    return aB - aA
+  })
+
+  // ── Step 4: Prior-material masks — compute for each pocket/drill op ─────────
+  computePriorMasks(ops, stlArrayBuffer, topZ)
+
+  // ── Assign sequential IDs ───────────────────────────────────────────────────
+  ops.forEach((op, i) => { op.id = i + 1 })
+
+  return ops
+}
+
 // ── Toolpath visualization data ───────────────────────────────────────────────
 
 export function computeToolpathData(stlArrayBuffer, operations, globalToolSettings) {
@@ -632,6 +1075,41 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
       continue
     }
 
+    if (eop.type === 'open-contour' && eop.centroids?.length) {
+      const sz = eop.detectionSliceZ ?? topZ - 0.01
+      const sc = extractSliceContours(stlArrayBuffer, sz)
+      if (sc.length > 0) {
+        const sOuter = classifyContours(sc)
+        const opStartDepth = eop.startDepth ?? 0
+        for (const centroid of eop.centroids) {
+          const ci = findContourForCentroid(sc, centroid, null, sOuter, false)
+          if (sOuter[ci]) continue
+          // Expand contour outward by tool radius so the outermost pass exits the stock boundary
+          const expanded = offsetContours([sc[ci]], toolRadius)
+          if (expanded.length === 0) continue
+          const effectiveDepth = eop.depth
+          if (effectiveDepth <= 0) continue
+          const zPasses = Math.ceil(effectiveDepth / stepdown)
+          const toolpaths = applyDirection(
+            generatePocketPasses(expanded[0], toolRadius, eop.stepover),
+            eop.direction
+          )
+          for (let pass = 1; pass <= zPasses; pass++) {
+            const z = -Math.min(pass * stepdown, effectiveDepth)
+            if (pass * stepdown < opStartDepth - 0.001) continue
+            for (const path of toolpaths) {
+              if (path.length < 2) continue
+              const polyline = path.map(([x, y]) => [x, y, z])
+              polyline.push([path[0][0], path[0][1], z])
+              paths.push(polyline)
+            }
+          }
+        }
+      }
+      result.push({ label: eop.label, color, paths, operationId: eop.id, feedrate: eop.feedrate })
+      continue
+    }
+
     if (eop.type === 'pocket' && eop.centroids?.length) {
       // Each centroid may have been detected at a different sliceZ (e.g. miter bar thread holes
       // only have STL walls below their parent hex pocket, not at the top surface). Use each
@@ -649,17 +1127,25 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
       for (const [sz, idxs] of sliceGroups) {
         const sc = extractSliceContours(stlArrayBuffer, sz)
         if (sc.length === 0) continue
-        const sDepths = getFeatureDepths(stlArrayBuffer, topZ, sc)
-        const sOuter = classifyContours(sc)
-        const startDepth = topZ - sz
+        const sDepths = getFeatureDepths(stlArrayBuffer, topZ, sc, sz)
+        const sHierarchy = buildContourHierarchy(sc)
+        const sOuter = sHierarchy.isOuter
 
         for (const idx of idxs) {
-          const ci = findContourForCentroid(sc, eop.centroids[idx], targetRadius)
+          // startDepth (from trackFeaturesAcrossLayers) and priorClearDepth (from
+          // computePriorMasks) are the two accurate sources for "material already cleared
+          // above this op" — both correctly resolve to 0/undefined for a plain top-accessible
+          // pocket, so that must be the final fallback, not a re-derived guess.
+          const startDepth = eop.startDepth ?? eop.priorClearDepth ?? 0
+          const ci = findContourForCentroid(sc, eop.centroids[idx], targetRadius, sOuter, false)
           if (sOuter[ci]) continue
           const effectiveDepth = Math.min(eop.depth, sDepths[ci])
           if (effectiveDepth <= 0) continue
           const zPasses = Math.ceil(effectiveDepth / stepdown)
-          const toolpaths = applyDirection(generatePocketPasses(sc[ci], toolRadius, eop.stepover), eop.direction)
+          const toolpaths = applyDirection(
+            generatePocketPasses(sc[ci], toolRadius, eop.stepover, eop.priorMaterialMask ?? null, findIslandsForContour(sHierarchy, sc, ci)),
+            eop.direction
+          )
           for (let pass = 1; pass <= zPasses; pass++) {
             const z = -Math.min(pass * stepdown, effectiveDepth)
             if (pass * stepdown < startDepth - 0.001) continue
@@ -677,9 +1163,11 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
       const sliceZ = eop.type === 'profile' ? 0.01 : (eop.detectionSliceZ ?? topZ - 0.01)
       const contours = extractSliceContours(stlArrayBuffer, sliceZ)
       if (contours.length === 0) { result.push({ label: eop.label, color, paths, operationId: eop.id }); continue }
-      const featureDepths = eop.type === 'profile' ? contours.map(() => topZ) : getFeatureDepths(stlArrayBuffer, topZ, contours)
-      const isOuter = classifyContours(contours)
-      const startDepth = eop.type === 'pocket' && eop.detectionSliceZ != null ? topZ - eop.detectionSliceZ : 0
+      const featureDepths = eop.type === 'profile' ? contours.map(() => topZ) : getFeatureDepths(stlArrayBuffer, topZ, contours, sliceZ)
+      const hierarchy = buildContourHierarchy(contours)
+      const isOuter = hierarchy.isOuter
+      const startDepth = eop.startDepth ?? eop.priorClearDepth
+        ?? (eop.type === 'pocket' && eop.detectionSliceZ != null ? topZ - eop.detectionSliceZ : 0)
 
       for (const ci of findContoursForOp(contours, isOuter, eop)) {
         if (eop.type === 'profile' && !isOuter[ci]) continue
@@ -689,7 +1177,7 @@ export function computeToolpathData(stlArrayBuffer, operations, globalToolSettin
         const zPasses = Math.ceil(effectiveDepth / stepdown)
         const toolpaths = applyDirection(
           eop.type === 'pocket'
-            ? generatePocketPasses(contours[ci], toolRadius, eop.stepover)
+            ? generatePocketPasses(contours[ci], toolRadius, eop.stepover, eop.priorMaterialMask ?? null, findIslandsForContour(hierarchy, contours, ci))
             : offsetContours([contours[ci]], toolRadius),
           eop.direction
         )
@@ -841,24 +1329,19 @@ export function buildGcodeLineMap(gcode, moveSeq) {
   // Parse G-code — only collect lines that explicitly move X or Y (skip Z-only raises)
   const lines = gcode.split('\n')
   let cx = 0, cy = 0, cz = 0
-  let isRapid = true
   const gcodeMotions = []
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].replace(/;.*/, '').trim()
     if (!line) continue
     let nx = cx, ny = cy, nz = cz
-    let hasX = false, hasY = false, hasG0 = false, hasG1 = false
+    let hasX = false, hasY = false
     for (const word of (line.toUpperCase().match(/[A-Z][+-]?[0-9.]+/g) ?? [])) {
       const letter = word[0], val = parseFloat(word.slice(1))
-      if      (letter === 'G' && val === 0) hasG0 = true
-      else if (letter === 'G' && val === 1) hasG1 = true
-      else if (letter === 'X') { nx = val; hasX = true }
+      if      (letter === 'X') { nx = val; hasX = true }
       else if (letter === 'Y') { ny = val; hasY = true }
       else if (letter === 'Z') { nz = val }
     }
-    if (hasG0) isRapid = true
-    if (hasG1) isRapid = false
 
     if ((hasX || hasY) && (nx !== cx || ny !== cy || nz !== cz)) {
       gcodeMotions.push({ lineIndex: i, x: nx, y: ny })
@@ -974,7 +1457,6 @@ export function generateGcode(stlArrayBuffer, operations, postProcessorId, globa
   return lines.join('\n')
 }
 
-
 function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBase) {
   const lines = []
   const stepdown = Math.max(eop.stepdown, 0.001)
@@ -1016,6 +1498,48 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
     return lines
   }
 
+  if (eop.type === 'open-contour' && eop.centroids?.length) {
+    const sz = eop.detectionSliceZ ?? topZ - 0.01
+    const sc = extractSliceContours(stlArrayBuffer, sz)
+    if (sc.length === 0) { lines.push(pp.comment('No contours found')); return lines }
+    const sOuter = classifyContours(sc)
+    const opStartDepth = eop.startDepth ?? 0
+    const effectiveDepth = eop.depth
+
+    for (const [cx, cy] of eop.centroids) {
+      const ci = findContourForCentroid(sc, [cx, cy], null, sOuter, false)
+      if (sOuter[ci]) continue
+      const expanded = offsetContours([sc[ci]], toolRadius)
+      if (expanded.length === 0) continue
+      if (effectiveDepth <= 0) continue
+      const zPasses = Math.ceil(effectiveDepth / stepdown)
+      const validPaths = applyDirection(
+        generatePocketPasses(expanded[0], toolRadius, eop.stepover).filter(p => p.length >= 2),
+        eop.direction
+      )
+      if (validPaths.length === 0) continue
+
+      for (let pass = 1; pass <= zPasses; pass++) {
+        const cutZ = zBase - Math.min(pass * stepdown, effectiveDepth)
+        if (pass * stepdown < opStartDepth - 0.001) continue
+        lines.push(pp.comment(`Open contour pass ${pass}/${zPasses} — depth ${(zBase - cutZ).toFixed(3)} mm`))
+        const [startX, startY] = validPaths[0][0]
+        lines.push(pp.rapidTo(startX, startY, safeZ))
+        lines.push(pp.linearTo(undefined, undefined, cutZ, eop.feedrate * 0.3))
+        for (let pi = 0; pi < validPaths.length; pi++) {
+          const path = validPaths[pi]
+          const [rx, ry] = path[0]
+          if (pi > 0) lines.push(pp.linearTo(rx, ry, undefined, eop.feedrate))
+          for (let k = 1; k < path.length; k++)
+            lines.push(pp.linearTo(path[k][0], path[k][1], undefined, eop.feedrate))
+          lines.push(pp.linearTo(rx, ry, undefined, eop.feedrate))
+        }
+        lines.push(pp.rapidTo(undefined, undefined, safeZ))
+      }
+    }
+    return lines
+  }
+
   if (eop.type === 'pocket' && eop.centroids?.length) {
     // Each centroid may have been detected at a different sliceZ. Use per-centroid slices so
     // features only visible below a parent pocket (e.g. thread holes under hex heads) get
@@ -1032,17 +1556,25 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
     for (const [sz, idxs] of sliceGroups) {
       const sc = extractSliceContours(stlArrayBuffer, sz)
       if (sc.length === 0) continue
-      const sDepths = getFeatureDepths(stlArrayBuffer, topZ, sc)
-      const sOuter = classifyContours(sc)
-      const startDepth = topZ - sz
+      const sDepths = getFeatureDepths(stlArrayBuffer, topZ, sc, sz)
+      const sHierarchy = buildContourHierarchy(sc)
+      const sOuter = sHierarchy.isOuter
 
       for (const idx of idxs) {
-        const ci = findContourForCentroid(sc, eop.centroids[idx], targetRadius)
+        // startDepth (from trackFeaturesAcrossLayers) and priorClearDepth (from
+        // computePriorMasks) are the two accurate sources for "material already cleared
+        // above this op" — both correctly resolve to 0/undefined for a plain top-accessible
+        // pocket, so that must be the final fallback, not a re-derived guess.
+        const startDepth = eop.startDepth ?? eop.priorClearDepth ?? 0
+        const ci = findContourForCentroid(sc, eop.centroids[idx], targetRadius, sOuter, false)
         if (sOuter[ci]) continue
         const effectiveDepth = Math.min(eop.depth, sDepths[ci])
         if (effectiveDepth <= 0) continue
         const zPasses = Math.ceil(effectiveDepth / stepdown)
-        const validPaths = applyDirection(generatePocketPasses(sc[ci], toolRadius, eop.stepover).filter(p => p.length >= 2), eop.direction)
+        const validPaths = applyDirection(
+          generatePocketPasses(sc[ci], toolRadius, eop.stepover, eop.priorMaterialMask ?? null, findIslandsForContour(sHierarchy, sc, ci)).filter(p => p.length >= 2),
+          eop.direction
+        )
         if (validPaths.length === 0) continue
 
         for (let pass = 1; pass <= zPasses; pass++) {
@@ -1071,9 +1603,13 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
     const contours = extractSliceContours(stlArrayBuffer, sliceZ)
     if (contours.length === 0) { lines.push(pp.comment('No contours found')); return lines }
 
-    const featureDepths = eop.type === 'profile' ? contours.map(() => topZ) : getFeatureDepths(stlArrayBuffer, topZ, contours)
-    const isOuter = classifyContours(contours)
-    const startDepth = eop.type === 'pocket' && eop.detectionSliceZ != null ? topZ - eop.detectionSliceZ : 0
+    const featureDepths = eop.type === 'profile' ? contours.map(() => topZ) : getFeatureDepths(stlArrayBuffer, topZ, contours, sliceZ)
+    const hierarchy = buildContourHierarchy(contours)
+    const isOuter = hierarchy.isOuter
+    // startDepth (from trackFeaturesAcrossLayers) and priorClearDepth (from computePriorMasks)
+    // are the two accurate sources for "material already cleared above this op" — both
+    // correctly resolve to 0/undefined for a plain top-accessible pocket.
+    const startDepth = eop.startDepth ?? eop.priorClearDepth ?? 0
 
     for (const ci of findContoursForOp(contours, isOuter, eop)) {
       if (eop.type === 'profile' && !isOuter[ci]) continue
@@ -1083,7 +1619,7 @@ function generateMillingOp(stlArrayBuffer, eop, pp, safeZ, originSafeZ, ms, zBas
       const zPasses = Math.ceil(effectiveDepth / stepdown)
       const toolpaths = applyDirection(
         eop.type === 'pocket'
-          ? generatePocketPasses(contours[ci], toolRadius, eop.stepover)
+          ? generatePocketPasses(contours[ci], toolRadius, eop.stepover, eop.priorMaterialMask ?? null, findIslandsForContour(hierarchy, contours, ci))
           : offsetContours([contours[ci]], toolRadius),
         eop.direction
       )

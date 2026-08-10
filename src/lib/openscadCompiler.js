@@ -23,7 +23,7 @@ export async function compileOpenSCAD(scadCode) {
     stlString = await openscad.renderToStl(scadCode)
   } catch (err) {
     const detail = errors.join('\n') || err.message || 'Unknown error'
-    throw new Error(detail)
+    throw new Error(detail, { cause: err })
   }
 
   if (!stlString || stlString.trim().length < 10) {

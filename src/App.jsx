@@ -5,7 +5,7 @@ import CodeEditorPanel from './components/CodeEditorPanel'
 import GcodePanel from './components/GcodePanel'
 import PreviewPanel from './components/PreviewPanel'
 import RightPanel from './components/RightPanel'
-import { detectFeatures, generateGcode, computeToolpathData, computeRapidPaths, computeMoveSequence, buildGcodeLineMap } from './lib/gcodeGenerator'
+import { analyzeVolume, generateGcode, computeToolpathData, computeRapidPaths, computeMoveSequence, buildGcodeLineMap } from './lib/gcodeGenerator'
 
 const DEFAULT_SCAD = `// Jig Depth
 jigDepth = 90;
@@ -178,6 +178,9 @@ export default function App() {
 
   useEffect(() => {
     if (!stlData) return
+    // Immediate "generating" cue while the debounce timer below runs; the actual result
+    // lands asynchronously in the timeout, so this can't be derived at render time.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setGcodeStatus('generating')
     setGcodeError(null)
     const timer = setTimeout(() => {
@@ -205,7 +208,7 @@ export default function App() {
     function onMove(e) {
       if (!isResizing.current) return
       const dy = resizeStart.current.y - e.clientY
-      setGcodeHeight(h => Math.max(80, Math.min(600, resizeStart.current.h + dy)))
+      setGcodeHeight(Math.max(80, Math.min(600, resizeStart.current.h + dy)))
     }
     function onUp() { isResizing.current = false }
     window.addEventListener('mousemove', onMove)
@@ -222,7 +225,7 @@ export default function App() {
   const handleStlReady = useCallback((data) => {
     setStlData(data)
     if (data) {
-      const detected = detectFeatures(data, globalToolSettings.toolDiameter)
+      const detected = analyzeVolume(data, globalToolSettings.toolDiameter)
       setOperations(detected)
       setSelectedOperationId(detected[0]?.id ?? null)
     }

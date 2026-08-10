@@ -28,3 +28,37 @@ export function offsetContours(contours, offsetMm) {
 
   return solution.map(fromClipper)
 }
+
+export function unionContours(contours) {
+  if (contours.length === 0) return []
+  if (contours.length === 1) return [contours[0]]
+
+  const clipper = new ClipperLib.Clipper()
+  for (const contour of contours) {
+    clipper.AddPath(toClipper(contour), ClipperLib.PolyType.ptSubject, true)
+  }
+  const solution = new ClipperLib.Paths()
+  clipper.Execute(
+    ClipperLib.ClipType.ctUnion,
+    solution,
+    ClipperLib.PolyFillType.pftNonZero,
+    ClipperLib.PolyFillType.pftNonZero
+  )
+  return solution.map(fromClipper)
+}
+
+export function clipContours(subject, clip) {
+  if (subject.length === 0 || clip.length === 0) return subject
+
+  const clipper = new ClipperLib.Clipper()
+  for (const c of subject) clipper.AddPath(toClipper(c), ClipperLib.PolyType.ptSubject, true)
+  for (const c of clip) clipper.AddPath(toClipper(c), ClipperLib.PolyType.ptClip, true)
+  const solution = new ClipperLib.Paths()
+  clipper.Execute(
+    ClipperLib.ClipType.ctDifference,
+    solution,
+    ClipperLib.PolyFillType.pftNonZero,
+    ClipperLib.PolyFillType.pftNonZero
+  )
+  return solution.map(fromClipper)
+}
